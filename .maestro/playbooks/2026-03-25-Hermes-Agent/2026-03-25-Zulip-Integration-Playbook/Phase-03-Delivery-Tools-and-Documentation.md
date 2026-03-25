@@ -40,10 +40,20 @@ Turn the Zulip adapter into a full Hermes platform by completing outbound delive
     - `README.md`: Added Zulip to "Lives where you do" feature row and Messaging Gateway docs table
     - `AGENTS.md`: Added `zulip` to the platforms/ directory comment in the project structure
 
-- [ ] Create the dedicated Zulip setup guide at `website/docs/user-guide/messaging/zulip.md`:
-  - Use `website/docs/user-guide/messaging/mattermost.md` as the starting pattern, but rewrite for Zulip’s actual bot creation, stream/topic behavior, auth model, and home-destination concepts
-  - Include working examples for DM use, stream mention use, allowlists, cron delivery, and home stream/topic configuration
-  - Keep the guide practical and minimal; avoid promising features the adapter does not implement yet
+- [x] Create the dedicated Zulip setup guide at `website/docs/user-guide/messaging/zulip.md`:
+   - Use `website/docs/user-guide/messaging/mattermost.md` as the starting pattern, but rewrite for Zulip's actual bot creation, stream/topic behavior, auth model, and home-destination concepts
+   - Include working examples for DM use, stream mention use, allowlists, cron delivery, and home stream/topic configuration
+   - Keep the guide practical and minimal; avoid promising features the adapter does not implement yet
+   - **Notes:**
+     - Followed the Mattermost guide structure: frontmatter, intro, "How Hermes Behaviors" table, session model, step-by-step setup (bot creation, stream subscription, configuration), home channel, mention gating, cross-platform sending, cron delivery, media delivery, troubleshooting, security, and notes sections
+     - Auth section covers Zulip-specific bot creation via Settings → Your bots → Generic bot, with API key handling
+     - Stream subscription step added (Zulip-specific requirement unlike Mattermost's channel membership)
+     - Mention gating section covers `ZULIP_REQUIRE_MENTION` and `ZULIP_FREE_RESPONSE_STREAMS` with practical examples
+     - All 10 Zulip env vars documented: `ZULIP_SITE_URL`, `ZULIP_BOT_EMAIL`, `ZULIP_API_KEY`, `ZULIP_ALLOWED_USERS`, `ZULIP_ALLOW_ALL_USERS`, `ZULIP_DEFAULT_STREAM`, `ZULIP_HOME_TOPIC`, `ZULIP_HOME_CHANNEL`, `ZULIP_REQUIRE_MENTION`, `ZULIP_FREE_RESPONSE_STREAMS`
+     - Media delivery table documents what works (images inline, documents as links, video as links) and what doesn't (voice messages)
+     - Cron delivery section explains `ZULIP_HOME_CHANNEL` and `deliver='zulip:stream_id:topic'` syntax
+     - Troubleshooting covers: not responding, 401 errors, stream mention gating, missing zulip package, event queue reconnects, offline bot, and user not allowed
+     - Voice messages explicitly documented as not supported with explanation
 
 - [ ] Add tests for outbound delivery and platform-wide integration points:
   - Extend `tests/tools/test_send_message_tool.py` with Zulip routing, target parsing, and home-channel fallback coverage
