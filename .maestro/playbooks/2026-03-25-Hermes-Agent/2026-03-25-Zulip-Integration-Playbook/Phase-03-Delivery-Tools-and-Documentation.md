@@ -29,10 +29,16 @@ Turn the Zulip adapter into a full Hermes platform by completing outbound delive
     - Added imports for `io`, `mimetypes`, `Path`, `cache_image_from_bytes`, `cache_document_from_bytes` for future inbound-media caching use
     - All 178 existing Zulip tests pass with no regressions
 
-- [ ] Update setup, status, and environment-reference surfaces to match the completed feature set:
+- [x] Update setup, status, and environment-reference surfaces to match the completed feature set:
   - Extend `hermes_cli/gateway.py` prompts/help text only where the finished Zulip feature set requires clearer setup guidance
   - Update `website/docs/reference/environment-variables.md` with all Zulip env vars
   - Update `README.md`, `AGENTS.md`, and `website/docs/user-guide/messaging/index.md` anywhere platform lists, docs tables, diagrams, or security examples should now include Zulip
+  - **Notes:**
+    - `hermes_cli/gateway.py`: Enhanced Zulip setup instructions to mention `pip install zulip`, mention-gating configuration vars, media delivery support (images/documents/video), and cron delivery via `ZULIP_HOME_CHANNEL` or `deliver='zulip:stream_id:topic'`
+    - `environment-variables.md`: Added all 10 Zulip env vars (ZULIP_SITE_URL, ZULIP_BOT_EMAIL, ZULIP_API_KEY, ZULIP_ALLOWED_USERS, ZULIP_ALLOW_ALL_USERS, ZULIP_DEFAULT_STREAM, ZULIP_HOME_TOPIC, ZULIP_HOME_CHANNEL, ZULIP_REQUIRE_MENTION, ZULIP_FREE_RESPONSE_STREAMS) in the Messaging section between Matrix and Home Assistant entries
+    - `messaging/index.md`: Added Zulip to frontmatter description, intro paragraph, Mermaid architecture diagram (node + edge), Security allowlist examples, Platform-Specific Toolsets table (with image/document/video delivery note), and Next Steps links (pointing to future zulip.md guide)
+    - `README.md`: Added Zulip to "Lives where you do" feature row and Messaging Gateway docs table
+    - `AGENTS.md`: Added `zulip` to the platforms/ directory comment in the project structure
 
 - [ ] Create the dedicated Zulip setup guide at `website/docs/user-guide/messaging/zulip.md`:
   - Use `website/docs/user-guide/messaging/mattermost.md` as the starting pattern, but rewrite for Zulip’s actual bot creation, stream/topic behavior, auth model, and home-destination concepts
