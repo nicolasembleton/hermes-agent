@@ -9,7 +9,7 @@ Turn the Zulip adapter into a full Hermes platform by completing outbound delive
   - Implement a standalone `_send_zulip(...)` helper that can send to a home destination, a DM target, or a `stream:topic` destination without requiring the live gateway adapter instance
   - Make sure target parsing is deterministic and reuse the adapter’s chat-id parsing helpers where practical instead of duplicating string logic
 
-- [ ] Add Zulip to scheduled delivery and tool schemas:
+- [x] Add Zulip to scheduled delivery and tool schemas:
   - Update `cron/scheduler.py` platform delivery mapping so cron jobs can deliver to Zulip
   - Update `tools/cronjob_tools.py` descriptions/examples to mention Zulip wherever delivery options are enumerated
   - Verify home-channel fallback behavior for Zulip using `ZULIP_DEFAULT_STREAM` and `ZULIP_HOME_TOPIC`, and keep the behavior explicit in code comments/tests

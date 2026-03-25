@@ -81,7 +81,16 @@ def _resolve_delivery_target(job: dict) -> Optional[dict]:
 
     if ":" in deliver:
         platform_name, rest = deliver.split(":", 1)
-        # Check for thread_id suffix (e.g. "telegram:-1003724596514:17")
+        # Zulip chat IDs contain colons (e.g. "123:topic", "dm:email@example.com",
+        # "group_dm:a@b.com,c@d.com").  The entire rest is the chat_id; Zulip has
+        # no separate thread_id concept.
+        if platform_name.lower() == "zulip":
+            return {
+                "platform": platform_name,
+                "chat_id": rest,
+                "thread_id": None,
+            }
+        # Other platforms: check for thread_id suffix (e.g. "telegram:-1003724596514:17")
         if ":" in rest:
             chat_id, thread_id = rest.split(":", 1)
         else:
@@ -145,6 +154,7 @@ def _deliver_result(job: dict, content: str) -> None:
         "mattermost": Platform.MATTERMOST,
         "homeassistant": Platform.HOMEASSISTANT,
         "dingtalk": Platform.DINGTALK,
+        "zulip": Platform.ZULIP,
         "email": Platform.EMAIL,
         "sms": Platform.SMS,
     }
