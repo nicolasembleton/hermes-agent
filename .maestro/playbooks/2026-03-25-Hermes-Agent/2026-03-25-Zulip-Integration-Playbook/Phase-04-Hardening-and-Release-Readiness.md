@@ -142,7 +142,35 @@ Finish the Zulip integration to a production-ready standard: security redaction,
      test_send_message_tool.py + test_scheduler.py + test_redact.py).
    -->
 
-- [ ] Prepare the implementation for handoff without creating extra project files:
+- [x] Prepare the implementation for handoff without creating extra project files: <!-- MAESTRO: completed 2026-03-25 -->
   - Review the changed file list and confirm it matches the intended scope from the discovery spec
   - Capture any manual validation notes needed by the human reviewer inside the PR description or commit message later, not as new repo files during this playbook run
   - Leave the branch with passing tests and updated docs, ready for normal review workflow
+
+  <!-- Handoff notes:
+  - CHANGED FILE SCOPE (Phase 04, 14 files):
+    1. agent/redact.py — added _HTTPS_CREDENTIALS_RE pattern (general, not Zulip-specific)
+    2. gateway/platforms/zulip.py — removed 2 redundant imports (readability pass)
+    3. gateway/run.py — added Platform.ZULIP to 4 toolset/config dicts
+    4. gateway/session.py — added Platform.ZULIP to _PII_SAFE_PLATFORMS
+    5. hermes_cli/main.py — added zulip to --deliver help + insights
+    6. hermes_cli/tools_config.py — added zulip to PLATFORMS dict + detection
+    7. tests/agent/test_redact.py — HTTPS credential redaction tests (Zulip scenarios)
+    8. tests/gateway/test_pii_redaction.py — 5 Zulip PII redaction tests
+    9. tests/gateway/test_unauthorized_dm_behavior.py — Zulip DM pairing test
+    10. tests/gateway/test_zulip.py — removed 2 redundant imports (readability pass)
+    11. website/docs/reference/faq.md — [zulip] in install example
+    12. website/docs/reference/toolsets-reference.md — hermes-zulip row
+    13. website/docs/user-guide/features/vision.md — Zulip in image platforms
+    14. Phase-04-Hardening-and-Release-Readiness.md — audit notes updated
+  - MANUAL VALIDATION NOTES (for PR description):
+    * Zulip integration has NOT been tested against a live Zulip server in this
+      playbook run — only unit/integration tests with mocks. The reviewer should
+      verify against a real Zulip org (cloud or self-hosted) before merging.
+    * The _HTTPS_CREDENTIALS_RE pattern in redact.py is general-purpose — verify
+      it doesn't over-redact in non-Zulip error messages.
+    * Zulip voice messages are intentionally unsupported (Zulip has no voice
+      bubble UI) — send_voice falls back to the base class (file-as-text).
+  - TEST STATUS: 381 cross-platform tests pass, compileall clean across all modules.
+  - NO NEW PROJECT FILES CREATED: All changes are modifications to existing files.
+  -->
