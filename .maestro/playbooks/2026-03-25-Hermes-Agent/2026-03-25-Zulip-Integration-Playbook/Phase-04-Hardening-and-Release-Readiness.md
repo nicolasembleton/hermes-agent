@@ -61,9 +61,31 @@ Finish the Zulip integration to a production-ready standard: security redaction,
     and fixing only Zulip there would be inconsistent.
   -->
 
-- [ ] Expand final regression coverage to the shared edges Zulip can break:
+- [x] Expand final regression coverage to the shared edges Zulip can break: <!-- MAESTRO: completed 2026-03-25 -->
   - Update or add tests covering authorization map inclusion, channel-directory visibility, cron delivery mappings, send-message platform maps, and any redaction helpers introduced in this phase
   - Prefer extending existing shared test files when the behavior is cross-platform; keep Zulip-specific adapter behavior in `tests/gateway/test_zulip.py`
+
+  <!-- Regression coverage notes:
+  - AUDITED existing coverage across 6+ test files:
+    * Auth maps: test_zulip.py (TestZulipAuthorization, TestZulipSubsystemIntegration) ✅
+    * Channel directory: test_channel_directory.py (TestZulipSessionDiscovery, TestSessionEntryNameZulipTopics, TestZulipFormatDirectoryDisplay) ✅
+    * Cron delivery: tests/cron/test_scheduler.py (7 dedicated Zulip delivery tests) ✅
+    * Send-message: tests/tools/test_send_message_tool.py (TestParseZulipTargetRef, TestSendToPlatformZulip, TestSendZulipStandalone, TestSendMessageToolZulip) ✅
+    * Redaction helpers: tests/agent/test_redact.py (TestHttpsBasicAuthRedaction with Zulip scenarios) ✅
+  - GAPS FOUND AND FIXED:
+    1. PII redaction (test_pii_redaction.py): Zulip email user_ids were NOT covered.
+       Added 5 tests: test_zulip_email_user_id_hashed, test_zulip_dm_chat_id_hashed_preserves_dm_prefix,
+       test_zulip_stream_chat_id_hashed_preserves_stream_prefix, test_zulip_home_channel_id_hashed.
+       Also added Platform.ZULIP to _PII_SAFE_PLATFORMS in gateway/session.py (Zulip uses @**Name**
+       mentions, not @email, so raw email user-IDs are safe to redact). Updated docstring to also
+       mention Slack exclusion alongside Discord.
+    2. Unauthorized DM behavior (test_unauthorized_dm_behavior.py): Zulip was NOT covered.
+       Added test_unauthorized_zulip_dm_pairs_by_default verifying Zulip triggers pairing flow.
+       Added ZULIP_ALLOWED_USERS and ZULIP_ALLOW_ALL_USERS to _clear_auth_env helper.
+  - ALL 348 cross-platform tests pass (test_zulip.py + test_pii_redaction.py +
+    test_unauthorized_dm_behavior.py + test_channel_directory.py + test_send_message_tool.py +
+    test_scheduler.py + test_redact.py).
+  -->
 
 - [ ] Run the final verification matrix and fix failures before moving on:
   - Run `source venv/bin/activate && python -m pytest tests/gateway/test_zulip.py tests/gateway/ tests/tools/test_send_message_tool.py -q`

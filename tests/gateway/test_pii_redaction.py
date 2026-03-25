@@ -57,12 +57,13 @@ def _make_context(
     user_name=None,
     chat_id="telegram:99999",
     platform=Platform.TELEGRAM,
+    chat_type="dm",
     home_channels=None,
 ):
     source = SessionSource(
         platform=platform,
         chat_id=chat_id,
-        chat_type="dm",
+        chat_type=chat_type,
         user_id=user_id,
         user_name=user_name,
     )
@@ -154,3 +155,51 @@ class TestBuildSessionContextPromptRedaction:
         ctx = _make_context(user_id="U12345ABC", platform=Platform.SLACK)
         prompt = build_session_context_prompt(ctx, redact_pii=True)
         assert "U12345ABC" in prompt
+
+    def test_zulip_email_user_id_hashed(self):
+        """Zulip user IDs are emails — they are PII and should be hashed."""
+        ctx = _make_context(user_id="alice@example.com", platform=Platform.ZULIP)
+        prompt = build_session_context_prompt(ctx, redact_pii=True)
+        assert "alice@example.com" not in prompt
+        assert "user_" in prompt
+
+    def test_zulip_dm_chat_id_hashed_preserves_dm_prefix(self):
+        """Zulip DM chat IDs like 'dm:alice@example.com' should hash the email part."""
+        ctx = _make_context(
+            user_id="alice@example.com",
+            chat_id="dm:alice@example.com",
+            platform=Platform.ZULIP,
+        )
+        prompt = build_session_context_prompt(ctx, redact_pii=True)
+        assert "alice@example.com" not in prompt
+        assert "dm:" in prompt  # prefix preserved
+
+    def test_zulip_stream_chat_id_hashed_preserves_stream_prefix(self):
+        """Zulip stream chat IDs like '42:general' should hash after the colon."""
+        ctx = _make_context(
+            user_id="alice@example.com",
+            chat_id="42:general",
+            platform=Platform.ZULIP,
+            chat_type="stream",
+        )
+        prompt = build_session_context_prompt(ctx, redact_pii=True)
+        assert "general" not in prompt
+        assert "42:" in prompt  # stream ID prefix preserved
+
+    def test_zulip_home_channel_id_hashed(self):
+        """Home channel IDs for Zulip should be hashed when redact_pii=True."""
+        hc = {
+            Platform.ZULIP: HomeChannel(
+                platform=Platform.ZULIP,
+                chat_id="dm:alice@example.com",
+                name="Home DM",
+            )
+        }
+        ctx = _make_context(
+            user_id="alice@example.com",
+            platform=Platform.ZULIP,
+            home_channels=hc,
+        )
+        prompt = build_session_context_prompt(ctx, redact_pii=True)
+        assert "alice@example.com" not in prompt
+        assert "Home DM" in prompt
