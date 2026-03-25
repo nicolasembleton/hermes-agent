@@ -1084,3 +1084,494 @@ class TestMissingSubjectField:
 
         msg_event = self.adapter.handle_message.call_args[0][0]
         assert msg_event.source.chat_topic == "(no topic)"
+
+
+# ---------------------------------------------------------------------------
+# Mention stripping
+# ---------------------------------------------------------------------------
+
+
+class TestZulipMentionStripping:
+    """Verify that @mention patterns are stripped from stream message content."""
+
+    def setup_method(self):
+        self.adapter = _make_adapter(bot_email="bot@example.zulipchat.com")
+        self.adapter._bot_user_id = 42
+        self.adapter._bot_full_name = "Hermes Bot"
+        self.adapter.handle_message = AsyncMock()
+        self.adapter._stream_name_cache = {99: "general"}
+
+    @pytest.mark.asyncio
+    async def test_full_name_mention_stripped(self):
+        """@**Hermes Bot** should be removed from content."""
+        message = {
+            "id": 1001,
+            "sender_email": "alice@example.com",
+            "sender_full_name": "Alice",
+            "sender_id": 10,
+            "type": "stream",
+            "stream_id": 99,
+            "subject": "test",
+            "content": "@**Hermes Bot** what is the weather?",
+        }
+        self.adapter._dispatch_inbound(message, {})
+
+        msg_event = self.adapter.handle_message.call_args[0][0]
+        assert msg_event.text == "what is the weather?"
+
+    @pytest.mark.asyncio
+    async def test_email_mention_stripped(self):
+        """@bot@example.zulipchat.com should be removed from content."""
+        message = {
+            "id": 1002,
+            "sender_email": "alice@example.com",
+            "sender_full_name": "Alice",
+            "sender_id": 10,
+            "type": "stream",
+            "stream_id": 99,
+            "subject": "test",
+            "content": "@bot@example.zulipchat.com hello!",
+        }
+        self.adapter._dispatch_inbound(message, {})
+
+        msg_event = self.adapter.handle_message.call_args[0][0]
+        assert msg_event.text == "hello!"
+
+    @pytest.mark.asyncio
+    async def test_case_insensitive_mention_stripped(self):
+        """Mention stripping should be case-insensitive."""
+        message = {
+            "id": 1003,
+            "sender_email": "alice@example.com",
+            "sender_full_name": "Alice",
+            "sender_id": 10,
+            "type": "stream",
+            "stream_id": 99,
+            "subject": "test",
+            "content": "@**hermes bot** please help me",
+        }
+        self.adapter._dispatch_inbound(message, {})
+
+        msg_event = self.adapter.handle_message.call_args[0][0]
+        assert msg_event.text == "please help me"
+
+    @pytest.mark.asyncio
+    async def test_mention_in_middle_of_content(self):
+        """Mention embedded in longer content should be stripped cleanly."""
+        message = {
+            "id": 1004,
+            "sender_email": "alice@example.com",
+            "sender_full_name": "Alice",
+            "sender_id": 10,
+            "type": "stream",
+            "stream_id": 99,
+            "subject": "test",
+            "content": "Hey @**Hermes Bot** can you look at this?",
+        }
+        self.adapter._dispatch_inbound(message, {})
+
+        msg_event = self.adapter.handle_message.call_args[0][0]
+        assert msg_event.text == "Hey can you look at this?"
+
+    @pytest.mark.asyncio
+    async def test_dm_no_mention_stripping(self):
+        """DMs should NOT have mention stripping applied."""
+        message = {
+            "id": 1005,
+            "sender_email": "alice@example.com",
+            "sender_full_name": "Alice",
+            "sender_id": 10,
+            "type": "private",
+            "content": "@**Hermes Bot** help me",
+            "display_recipient": [
+                {"email": "bot@example.zulipchat.com"},
+                {"email": "alice@example.com"},
+            ],
+        }
+        self.adapter._dispatch_inbound(message, {})
+
+        msg_event = self.adapter.handle_message.call_args[0][0]
+        # DMs don't go through mention logic — content should be unchanged
+        assert msg_event.text == "@**Hermes Bot** help me"
+
+
+class TestStripBotMentionHelper:
+    """Unit tests for the _strip_bot_mention helper."""
+
+    def test_strips_single_pattern(self):
+        from gateway.platforms.zulip import _strip_bot_mention
+        result = _strip_bot_mention(
+            "@**Bot Name** hello", ["@**Bot Name**"]
+        )
+        assert result == "hello"
+
+    def test_strips_email_pattern(self):
+        from gateway.platforms.zulip import _strip_bot_mention
+        result = _strip_bot_mention(
+            "@bot@example.com what's up", ["@bot@example.com"]
+        )
+        assert result == "what's up"
+
+    def test_strips_case_insensitive(self):
+        from gateway.platforms.zulip import _strip_bot_mention
+        result = _strip_bot_mention(
+            "@**BOT NAME** hello", ["@**Bot Name**"]
+        )
+        assert result == "hello"
+
+    def test_no_pattern_no_change(self):
+        from gateway.platforms.zulip import _strip_bot_mention
+        content = "just a regular message"
+        result = _strip_bot_mention(content, ["@**Someone Else**"])
+        assert result == content
+
+    def test_only_strips_first_occurrence(self):
+        """Only the first mention should be stripped (count=1)."""
+        from gateway.platforms.zulip import _strip_bot_mention
+        result = _strip_bot_mention(
+            "@**Bot** @**Bot** hello", ["@**Bot**"]
+        )
+        # First occurrence stripped, second remains
+        assert result == "@**Bot** hello"
+
+    def test_strips_whitespace_after_removal(self):
+        from gateway.platforms.zulip import _strip_bot_mention
+        result = _strip_bot_mention(
+            "  @**Bot**   hello  ", ["@**Bot**"]
+        )
+        assert result == "hello"
+
+
+# ---------------------------------------------------------------------------
+# ZULIP_REQUIRE_MENTION env var
+# ---------------------------------------------------------------------------
+
+
+class TestZulipRequireMention:
+    """Verify ZULIP_REQUIRE_MENTION env var behavior."""
+
+    def setup_method(self):
+        self.adapter = _make_adapter(bot_email="bot@example.zulipchat.com")
+        self.adapter._bot_user_id = 42
+        self.adapter._bot_full_name = "Hermes Bot"
+        self.adapter.handle_message = AsyncMock()
+        self.adapter._stream_name_cache = {99: "general"}
+
+    @pytest.mark.asyncio
+    async def test_default_requires_mention(self):
+        """By default, stream messages without mention should be ignored."""
+        message = {
+            "id": 1101,
+            "sender_email": "alice@example.com",
+            "sender_full_name": "Alice",
+            "sender_id": 10,
+            "type": "stream",
+            "stream_id": 99,
+            "subject": "test",
+            "content": "hello without mention",
+        }
+        self.adapter._dispatch_inbound(message, {})
+
+        self.adapter.handle_message.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_default_with_mention_passes(self):
+        """By default, stream messages with mention should be processed."""
+        message = {
+            "id": 1102,
+            "sender_email": "alice@example.com",
+            "sender_full_name": "Alice",
+            "sender_id": 10,
+            "type": "stream",
+            "stream_id": 99,
+            "subject": "test",
+            "content": "@**Hermes Bot** hello",
+        }
+        self.adapter._dispatch_inbound(message, {})
+
+        self.adapter.handle_message.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_require_mention_false_passes_without_mention(self, monkeypatch):
+        """When ZULIP_REQUIRE_MENTION=false, messages without mention pass."""
+        monkeypatch.setenv("ZULIP_REQUIRE_MENTION", "false")
+
+        # Create a fresh adapter to pick up the env var
+        adapter = _make_adapter(bot_email="bot@example.zulipchat.com")
+        adapter._bot_user_id = 42
+        adapter._bot_full_name = "Hermes Bot"
+        adapter.handle_message = AsyncMock()
+        adapter._stream_name_cache = {99: "general"}
+
+        message = {
+            "id": 1103,
+            "sender_email": "alice@example.com",
+            "sender_full_name": "Alice",
+            "sender_id": 10,
+            "type": "stream",
+            "stream_id": 99,
+            "subject": "test",
+            "content": "hello without mention",
+        }
+        adapter._dispatch_inbound(message, {})
+
+        adapter.handle_message.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_require_mention_zero_disables(self, monkeypatch):
+        """ZULIP_REQUIRE_MENTION=0 should disable mention requirement."""
+        monkeypatch.setenv("ZULIP_REQUIRE_MENTION", "0")
+
+        adapter = _make_adapter(bot_email="bot@example.zulipchat.com")
+        adapter._bot_user_id = 42
+        adapter._bot_full_name = "Hermes Bot"
+        adapter.handle_message = AsyncMock()
+        adapter._stream_name_cache = {99: "general"}
+
+        message = {
+            "id": 1104,
+            "sender_email": "alice@example.com",
+            "sender_full_name": "Alice",
+            "sender_id": 10,
+            "type": "stream",
+            "stream_id": 99,
+            "subject": "test",
+            "content": "hello without mention",
+        }
+        adapter._dispatch_inbound(message, {})
+
+        adapter.handle_message.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
+# ZULIP_FREE_RESPONSE_STREAMS env var
+# ---------------------------------------------------------------------------
+
+
+class TestZulipFreeResponseStreams:
+    """Verify ZULIP_FREE_RESPONSE_STREAMS env var behavior."""
+
+    @pytest.mark.asyncio
+    async def test_free_stream_bypasses_mention(self, monkeypatch):
+        """Messages in a free-response stream should not require mention."""
+        monkeypatch.setenv("ZULIP_FREE_RESPONSE_STREAMS", "general")
+
+        adapter = _make_adapter(bot_email="bot@example.zulipchat.com")
+        adapter._bot_user_id = 42
+        adapter._bot_full_name = "Hermes Bot"
+        adapter.handle_message = AsyncMock()
+        adapter._stream_name_cache = {99: "general"}
+
+        message = {
+            "id": 1201,
+            "sender_email": "alice@example.com",
+            "sender_full_name": "Alice",
+            "sender_id": 10,
+            "type": "stream",
+            "stream_id": 99,
+            "subject": "test",
+            "content": "hello without mention",
+        }
+        adapter._dispatch_inbound(message, {})
+
+        adapter.handle_message.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_non_free_stream_still_requires_mention(self, monkeypatch):
+        """Messages in non-free streams should still require mention."""
+        monkeypatch.setenv("ZULIP_FREE_RESPONSE_STREAMS", "random")
+
+        adapter = _make_adapter(bot_email="bot@example.zulipchat.com")
+        adapter._bot_user_id = 42
+        adapter._bot_full_name = "Hermes Bot"
+        adapter.handle_message = AsyncMock()
+        adapter._stream_name_cache = {99: "general"}
+
+        message = {
+            "id": 1202,
+            "sender_email": "alice@example.com",
+            "sender_full_name": "Alice",
+            "sender_id": 10,
+            "type": "stream",
+            "stream_id": 99,
+            "subject": "test",
+            "content": "hello without mention",
+        }
+        adapter._dispatch_inbound(message, {})
+
+        adapter.handle_message.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_free_stream_by_id(self, monkeypatch):
+        """Free-response streams can match by stream ID."""
+        monkeypatch.setenv("ZULIP_FREE_RESPONSE_STREAMS", "99")
+
+        adapter = _make_adapter(bot_email="bot@example.zulipchat.com")
+        adapter._bot_user_id = 42
+        adapter._bot_full_name = "Hermes Bot"
+        adapter.handle_message = AsyncMock()
+        adapter._stream_name_cache = {99: "general"}
+
+        message = {
+            "id": 1203,
+            "sender_email": "alice@example.com",
+            "sender_full_name": "Alice",
+            "sender_id": 10,
+            "type": "stream",
+            "stream_id": 99,
+            "subject": "test",
+            "content": "hello without mention",
+        }
+        adapter._dispatch_inbound(message, {})
+
+        adapter.handle_message.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_free_stream_case_insensitive(self, monkeypatch):
+        """Stream name matching should be case-insensitive."""
+        monkeypatch.setenv("ZULIP_FREE_RESPONSE_STREAMS", "GENERAL")
+
+        adapter = _make_adapter(bot_email="bot@example.zulipchat.com")
+        adapter._bot_user_id = 42
+        adapter._bot_full_name = "Hermes Bot"
+        adapter.handle_message = AsyncMock()
+        adapter._stream_name_cache = {99: "general"}
+
+        message = {
+            "id": 1204,
+            "sender_email": "alice@example.com",
+            "sender_full_name": "Alice",
+            "sender_id": 10,
+            "type": "stream",
+            "stream_id": 99,
+            "subject": "test",
+            "content": "hello without mention",
+        }
+        adapter._dispatch_inbound(message, {})
+
+        adapter.handle_message.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_multiple_free_streams(self, monkeypatch):
+        """Multiple free-response streams separated by commas."""
+        monkeypatch.setenv("ZULIP_FREE_RESPONSE_STREAMS", "general,random,help")
+
+        adapter = _make_adapter(bot_email="bot@example.zulipchat.com")
+        adapter._bot_user_id = 42
+        adapter._bot_full_name = "Hermes Bot"
+        adapter.handle_message = AsyncMock()
+        adapter._stream_name_cache = {99: "general", 20: "random"}
+
+        # general stream (in free list)
+        msg_general = {
+            "id": 1205,
+            "sender_email": "alice@example.com",
+            "sender_full_name": "Alice",
+            "sender_id": 10,
+            "type": "stream",
+            "stream_id": 99,
+            "subject": "test",
+            "content": "no mention in general",
+        }
+        adapter._dispatch_inbound(msg_general, {})
+        assert adapter.handle_message.call_count == 1
+
+        # random stream (in free list)
+        msg_random = {
+            "id": 1206,
+            "sender_email": "alice@example.com",
+            "sender_full_name": "Alice",
+            "sender_id": 10,
+            "type": "stream",
+            "stream_id": 20,
+            "subject": "test",
+            "content": "no mention in random",
+        }
+        adapter._dispatch_inbound(msg_random, {})
+        assert adapter.handle_message.call_count == 2
+
+
+# ---------------------------------------------------------------------------
+# Wildcard mentions
+# ---------------------------------------------------------------------------
+
+
+class TestZulipWildcardMentions:
+    """Verify @**all** and @**everyone** trigger the bot in streams."""
+
+    def setup_method(self):
+        self.adapter = _make_adapter(bot_email="bot@example.zulipchat.com")
+        self.adapter._bot_user_id = 42
+        self.adapter._bot_full_name = "Hermes Bot"
+        self.adapter.handle_message = AsyncMock()
+        self.adapter._stream_name_cache = {99: "general"}
+
+    @pytest.mark.asyncio
+    async def test_at_all_triggers_bot(self):
+        """@**all** should trigger the bot in streams."""
+        message = {
+            "id": 1301,
+            "sender_email": "alice@example.com",
+            "sender_full_name": "Alice",
+            "sender_id": 10,
+            "type": "stream",
+            "stream_id": 99,
+            "subject": "test",
+            "content": "@**all** check this out",
+        }
+        self.adapter._dispatch_inbound(message, {})
+
+        self.adapter.handle_message.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_at_everyone_triggers_bot(self):
+        """@**everyone** should trigger the bot in streams."""
+        message = {
+            "id": 1302,
+            "sender_email": "alice@example.com",
+            "sender_full_name": "Alice",
+            "sender_id": 10,
+            "type": "stream",
+            "stream_id": 99,
+            "subject": "test",
+            "content": "@**everyone** important announcement",
+        }
+        self.adapter._dispatch_inbound(message, {})
+
+        self.adapter.handle_message.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_wildcard_not_stripped_from_content(self):
+        """@**all** and @**everyone** should NOT be stripped from content."""
+        message = {
+            "id": 1303,
+            "sender_email": "alice@example.com",
+            "sender_full_name": "Alice",
+            "sender_id": 10,
+            "type": "stream",
+            "stream_id": 99,
+            "subject": "test",
+            "content": "@**all** this is a broadcast",
+        }
+        self.adapter._dispatch_inbound(message, {})
+
+        msg_event = self.adapter.handle_message.call_args[0][0]
+        # @**all** is NOT a bot mention pattern, so it stays in content
+        assert "@**all**" in msg_event.text
+
+    @pytest.mark.asyncio
+    async def test_case_insensitive_wildcard(self):
+        """Wildcard mentions should be case-insensitive."""
+        message = {
+            "id": 1304,
+            "sender_email": "alice@example.com",
+            "sender_full_name": "Alice",
+            "sender_id": 10,
+            "type": "stream",
+            "stream_id": 99,
+            "subject": "test",
+            "content": "@**ALL** attention please",
+        }
+        self.adapter._dispatch_inbound(message, {})
+
+        self.adapter.handle_message.assert_called_once()

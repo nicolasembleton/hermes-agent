@@ -12,9 +12,13 @@ Environment variables:
     ZULIP_BOT_EMAIL          Bot's email address
     ZULIP_API_KEY            Bot's API key (from Zulip bot settings)
     ZULIP_ALLOWED_USERS      Comma-separated email addresses
+    ZULIP_ALLOW_ALL_USERS    If "true", allow all Zulip users (skip allowlist)
     ZULIP_DEFAULT_STREAM     Default stream for outbound messages
     ZULIP_HOME_TOPIC         Default topic for cron/notification delivery
     ZULIP_HOME_CHANNEL       Home stream:topic for cron/notification delivery
+    ZULIP_REQUIRE_MENTION    Require @mention in streams (default: "true")
+    ZULIP_FREE_RESPONSE_STREAMS  Comma-separated stream names or IDs that
+                             don't require @mention
 """
 
 from __future__ import annotations
@@ -188,6 +192,30 @@ def _resolve_stream_name(
     return str(stream_id)
 
 
+def _strip_bot_mention(
+    content: str,
+    mention_patterns: List[str],
+) -> str:
+    """Remove bot mention patterns from message content.
+
+    Strips each pattern from the content (case-insensitive), then
+    normalizes whitespace (collapses double spaces, strips edges).
+
+    Zulip renders ``@**Full Name**`` and ``@email@example.com`` as
+    clickable mentions.  We remove them so the agent doesn't see its
+    own name as part of the user's message.
+    """
+    cleaned = content
+    for pattern in mention_patterns:
+        # Case-insensitive removal.
+        cleaned = re.sub(
+            re.escape(pattern), "", cleaned, count=1, flags=re.IGNORECASE
+        )
+    # Collapse any double spaces left by mention removal and strip edges.
+    cleaned = re.sub(r"  +", " ", cleaned).strip()
+    return cleaned
+
+
 # ---------------------------------------------------------------------------
 # Requirements check
 # ---------------------------------------------------------------------------
@@ -250,6 +278,18 @@ class ZulipAdapter(BasePlatformAdapter):
             config.extra.get("home_topic", "")
             or os.getenv("ZULIP_HOME_TOPIC", "")
         )
+
+        # Mention gating configuration (follows Discord's pattern).
+        self._require_mention: bool = os.getenv(
+            "ZULIP_REQUIRE_MENTION", "true"
+        ).lower() not in ("false", "0", "no")
+
+        free_streams_raw = os.getenv("ZULIP_FREE_RESPONSE_STREAMS", "")
+        self._free_response_streams: set = {
+            s.strip().lower()
+            for s in free_streams_raw.split(",")
+            if s.strip()
+        }
 
         # Zulip client (created in connect())
         self._client: Any = None
@@ -654,19 +694,42 @@ class ZulipAdapter(BasePlatformAdapter):
             mention_patterns = [
                 f"@**{self._bot_full_name}**",
                 f"@{self._bot_email}",
+                # Zulip wildcard mentions that should wake the bot.
+                "@**all**",
+                "@**everyone**",
             ]
-            has_mention = any(
-                pattern.lower() in content.lower()
-                for pattern in mention_patterns
-            )
-            if not has_mention:
-                logger.debug(
-                    "Zulip: skipping stream message without @mention "
-                    "(stream=%s, topic=%s)",
-                    chat_name,
-                    topic,
+
+            # Determine if this stream requires a mention.
+            require_mention = self._require_mention
+            if require_mention and self._free_response_streams:
+                # Check by stream name or stream ID.
+                stream_name_lower = chat_name.lower()
+                stream_id_str = str(stream_id)
+                if (stream_name_lower in self._free_response_streams
+                        or stream_id_str in self._free_response_streams):
+                    require_mention = False
+
+            if require_mention:
+                has_mention = any(
+                    pattern.lower() in content.lower()
+                    for pattern in mention_patterns
                 )
-                return
+                if not has_mention:
+                    logger.debug(
+                        "Zulip: skipping stream message without @mention "
+                        "(stream=%s, topic=%s)",
+                        chat_name,
+                        topic,
+                    )
+                    return
+
+            # Strip the bot mention from content so the agent sees
+            # only the user's actual message (follows Slack/Discord pattern).
+            bot_mention_only = [
+                f"@**{self._bot_full_name}**",
+                f"@{self._bot_email}",
+            ]
+            content = _strip_bot_mention(content, bot_mention_only)
         elif msg_type_name == "private":
             display_recipient = message.get("display_recipient")
             recipients = _extract_dm_recipients(

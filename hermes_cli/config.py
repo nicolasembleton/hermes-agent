@@ -39,8 +39,9 @@ _EXTRA_ENV_KEYS = frozenset({
     "MATTERMOST_HOME_CHANNEL", "MATTERMOST_REPLY_MODE",
     "MATRIX_PASSWORD", "MATRIX_ENCRYPTION", "MATRIX_HOME_ROOM",
     "ZULIP_SITE_URL", "ZULIP_BOT_EMAIL", "ZULIP_API_KEY",
-    "ZULIP_ALLOWED_USERS", "ZULIP_DEFAULT_STREAM",
-    "ZULIP_HOME_TOPIC", "ZULIP_HOME_CHANNEL",
+    "ZULIP_ALLOWED_USERS", "ZULIP_ALLOW_ALL_USERS",
+    "ZULIP_DEFAULT_STREAM", "ZULIP_HOME_TOPIC", "ZULIP_HOME_CHANNEL",
+    "ZULIP_REQUIRE_MENTION", "ZULIP_FREE_RESPONSE_STREAMS",
 })
 
 import yaml
@@ -811,12 +812,36 @@ OPTIONAL_ENV_VARS = {
         "password": False,
         "category": "messaging",
     },
+    "ZULIP_ALLOW_ALL_USERS": {
+        "description": "Allow all Zulip users to interact with the bot (true/false). Default: false.",
+        "prompt": "Allow all Zulip users (true/false)",
+        "url": None,
+        "password": False,
+        "category": "messaging",
+        "advanced": True,
+    },
     "ZULIP_DEFAULT_STREAM": {
         "description": "Default Zulip stream name for outbound messages",
         "prompt": "Zulip default stream",
         "url": None,
         "password": False,
         "category": "messaging",
+    },
+    "ZULIP_REQUIRE_MENTION": {
+        "description": "Require @mention in Zulip streams to trigger the bot (true/false). Default: true.",
+        "prompt": "Require @mention in streams (true/false)",
+        "url": None,
+        "password": False,
+        "category": "messaging",
+        "advanced": True,
+    },
+    "ZULIP_FREE_RESPONSE_STREAMS": {
+        "description": "Comma-separated Zulip stream names or IDs where @mention is not required",
+        "prompt": "Free-response streams (comma-separated)",
+        "url": None,
+        "password": False,
+        "category": "messaging",
+        "advanced": True,
     },
     "GATEWAY_ALLOW_ALL_USERS": {
         "description": "Allow all users to interact with messaging bots (true/false). Default: false.",
