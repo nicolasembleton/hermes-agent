@@ -26,6 +26,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import random
 import re
 import threading
 import time
@@ -49,6 +50,34 @@ MAX_MESSAGE_LENGTH = 4000
 _RECONNECT_BASE_DELAY = 2.0
 _RECONNECT_MAX_DELAY = 60.0
 _RECONNECT_JITTER = 0.2
+
+
+def _is_retryable_error(exc: Exception) -> bool:
+    """Determine if a Zulip event queue error is worth retrying.
+
+    Network errors, timeouts, and server errors (5xx) are retryable.
+    Authentication failures (401/403) and other client errors (4xx)
+    are not — the configuration or credentials need to be fixed first.
+
+    Falls back to *retryable* for unrecognized error shapes so the
+    event queue keeps trying on transient issues.
+    """
+    exc_name = type(exc).__name__
+
+    # Network-level errors are always retryable.
+    if any(keyword in exc_name for keyword in ("ConnectionError", "Timeout", "SSLError")):
+        return True
+
+    # Check for Zulip ``ClientError`` that carries an HTTP status.
+    if hasattr(exc, "http_status"):
+        status = getattr(exc, "http_status", 0)
+        if status in (401, 403):
+            return False
+        if 400 <= status < 500:
+            return False  # Client errors — user must fix config.
+
+    return True
+
 
 # ---------------------------------------------------------------------------
 # Chat-ID helpers
@@ -313,6 +342,12 @@ class ZulipAdapter(BasePlatformAdapter):
         # stream_id → stream_name reverse cache
         self._stream_name_cache: Dict[int, str] = {}
 
+        # Graceful shutdown: event that wakes the event-queue thread
+        # immediately when disconnect() is called, instead of waiting
+        # for the full backoff sleep to elapse.
+        self._shutdown_event = threading.Event()
+        self._consecutive_failures = 0
+
     # ------------------------------------------------------------------
     # Required overrides
     # ------------------------------------------------------------------
@@ -366,6 +401,8 @@ class ZulipAdapter(BasePlatformAdapter):
         # Start the event queue in a background thread.
         self._loop = asyncio.get_running_loop()
         self._closing = False
+        self._shutdown_event.clear()
+        self._consecutive_failures = 0
         self._event_thread = threading.Thread(
             target=self._run_event_queue,
             name="zulip-event-queue",
@@ -377,15 +414,31 @@ class ZulipAdapter(BasePlatformAdapter):
         return True
 
     async def disconnect(self) -> None:
-        """Stop the event queue and close the client."""
+        """Stop the event queue, cancel background tasks, and close the client."""
         self._closing = True
+        self._shutdown_event.set()  # Wake up the event thread immediately.
 
-        # The event thread checks _closing and will exit its loop.
+        # Wait for the event-queue thread to exit.
         if self._event_thread and self._event_thread.is_alive():
-            self._event_thread.join(timeout=5.0)
+            self._event_thread.join(timeout=10.0)
+
+        # Cancel any in-flight message-processing tasks that were
+        # scheduled on the asyncio event loop.
+        try:
+            await self.cancel_background_tasks()
+        except Exception:
+            pass
 
         self._client = None
         self._loop = None
+
+        # Clear caches to free memory and avoid stale data on reconnect.
+        self._seen_events.clear()
+        self._stream_id_cache.clear()
+        self._stream_name_cache.clear()
+        self._consecutive_failures = 0
+
+        self._mark_disconnected()
         logger.info("Zulip: disconnected")
 
     async def send(
@@ -574,23 +627,54 @@ class ZulipAdapter(BasePlatformAdapter):
         Uses ``call_on_each_event`` which internally handles long-polling
         and basic reconnection.  Wraps with our own exponential backoff
         for the cases where the Zulip client's internal retry gives up.
+
+        The backoff sleep uses :pymeth:`threading.Event.wait` so that
+        :meth:`disconnect` can wake the thread immediately instead of
+        waiting for the full delay to elapse.
         """
         delay = _RECONNECT_BASE_DELAY
+        self._consecutive_failures = 0
+
         while not self._closing:
             try:
                 self._client.call_on_each_event(
                     self._on_zulip_event,
                     event_types=["message"],
                 )
-                # If call_on_each_event returns (it shouldn't normally),
-                # reset delay and restart.
+                # ``call_on_each_event`` returned — server closed the
+                # event queue stream or the client hit an internal limit.
+                if self._closing:
+                    return
+                logger.info("Zulip: event queue stream ended — reconnecting")
+                self._consecutive_failures = 0
                 delay = _RECONNECT_BASE_DELAY
+                continue
             except Exception as exc:
                 if self._closing:
                     return
+
+                self._consecutive_failures += 1
+                retryable = _is_retryable_error(exc)
+
+                if not retryable:
+                    logger.error(
+                        "Zulip: non-retryable error (attempt %d): %s — "
+                        "stopping event queue",
+                        self._consecutive_failures,
+                        type(exc).__name__,
+                    )
+                    self._set_fatal_error(
+                        "ZULIP_EVENT_QUEUE_FATAL",
+                        f"Non-retryable error: {type(exc).__name__}: {exc}",
+                        retryable=False,
+                    )
+                    return
+
                 logger.warning(
-                    "Zulip: event queue error: %s — reconnecting in %.0fs",
-                    exc,
+                    "Zulip: event queue error (attempt %d): %s — "
+                    "reconnecting in %.0fs",
+                    self._consecutive_failures,
+                    type(exc).__name__,
                     delay,
                 )
 
@@ -598,9 +682,16 @@ class ZulipAdapter(BasePlatformAdapter):
                 return
 
             # Exponential backoff with jitter.
-            import random
             jitter = delay * _RECONNECT_JITTER * random.random()
-            time.sleep(delay + jitter)
+            sleep_time = delay + jitter
+            if self._consecutive_failures > 1:
+                logger.info(
+                    "Zulip: waiting %.1fs before reconnect attempt %d",
+                    sleep_time,
+                    self._consecutive_failures + 1,
+                )
+            if self._shutdown_event.wait(timeout=sleep_time):
+                return  # Shutdown signal received during backoff.
             delay = min(delay * 2, _RECONNECT_MAX_DELAY)
 
     def _on_zulip_event(self, event: Dict[str, Any]) -> None:
@@ -652,6 +743,13 @@ class ZulipAdapter(BasePlatformAdapter):
             return
 
         # Schedule async processing on the main event loop.
+        msg_type_log = message.get("type", "unknown")
+        logger.debug(
+            "Zulip: inbound msg_id=%s sender=%s type=%s",
+            msg_id,
+            sender_email,
+            msg_type_log,
+        )
         if self._loop and not self._loop.is_closed():
             self._loop.call_soon_threadsafe(
                 self._dispatch_inbound, message, event

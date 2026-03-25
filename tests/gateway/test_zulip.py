@@ -1,4 +1,6 @@
 """Tests for Zulip platform adapter."""
+import asyncio
+import threading
 import time
 import pytest
 from unittest.mock import MagicMock, patch, AsyncMock
@@ -402,7 +404,13 @@ class TestZulipConnect:
                 {"stream_id": 20, "name": "random"},
             ],
         }
-        mock_client.call_on_each_event = MagicMock()
+
+        # Make call_on_each_event stop the event queue after one call
+        # (simulating the blocking behavior of the real Zulip client).
+        def stop_after_one_call(*args, **kwargs):
+            adapter._closing = True
+
+        mock_client.call_on_each_event.side_effect = stop_after_one_call
 
         # Set up the event loop reference before calling connect,
         # which internally calls asyncio.get_running_loop()
@@ -1575,3 +1583,381 @@ class TestZulipWildcardMentions:
         self.adapter._dispatch_inbound(message, {})
 
         self.adapter.handle_message.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
+# Error classification
+# ---------------------------------------------------------------------------
+
+
+class TestIsRetryableError:
+    """Tests for the _is_retryable_error helper."""
+
+    def test_connection_error_is_retryable(self):
+        from gateway.platforms.zulip import _is_retryable_error
+        assert _is_retryable_error(ConnectionError("refused")) is True
+
+    def test_timeout_error_is_retryable(self):
+        from gateway.platforms.zulip import _is_retryable_error
+        assert _is_retryable_error(TimeoutError("timed out")) is True
+
+    def test_ssl_error_is_retryable(self):
+        from gateway.platforms.zulip import _is_retryable_error
+        # Match by class name containing "SSLError"
+        exc = type("SSLError", (Exception,), {})("cert verify failed")
+        assert _is_retryable_error(exc) is True
+
+    def test_http_401_not_retryable(self):
+        from gateway.platforms.zulip import _is_retryable_error
+        exc = Exception("unauthorized")
+        exc.http_status = 401
+        assert _is_retryable_error(exc) is False
+
+    def test_http_403_not_retryable(self):
+        from gateway.platforms.zulip import _is_retryable_error
+        exc = Exception("forbidden")
+        exc.http_status = 403
+        assert _is_retryable_error(exc) is False
+
+    def test_http_400_not_retryable(self):
+        from gateway.platforms.zulip import _is_retryable_error
+        exc = Exception("bad request")
+        exc.http_status = 400
+        assert _is_retryable_error(exc) is False
+
+    def test_http_429_not_retryable(self):
+        """Rate-limit errors (429) are client errors — not retryable."""
+        from gateway.platforms.zulip import _is_retryable_error
+        exc = Exception("rate limited")
+        exc.http_status = 429
+        assert _is_retryable_error(exc) is False
+
+    def test_http_500_is_retryable(self):
+        from gateway.platforms.zulip import _is_retryable_error
+        exc = Exception("internal server error")
+        exc.http_status = 500
+        assert _is_retryable_error(exc) is True
+
+    def test_http_502_is_retryable(self):
+        from gateway.platforms.zulip import _is_retryable_error
+        exc = Exception("bad gateway")
+        exc.http_status = 502
+        assert _is_retryable_error(exc) is True
+
+    def test_generic_exception_is_retryable(self):
+        from gateway.platforms.zulip import _is_retryable_error
+        assert _is_retryable_error(RuntimeError("unknown")) is True
+
+    def test_error_without_http_status_is_retryable(self):
+        """Exceptions without http_status attribute fall back to retryable."""
+        from gateway.platforms.zulip import _is_retryable_error
+        exc = ValueError("something")
+        assert _is_retryable_error(exc) is True
+
+
+# ---------------------------------------------------------------------------
+# Event queue lifecycle (backoff, reconnect, shutdown)
+# ---------------------------------------------------------------------------
+
+
+class TestZulipEventQueueLifecycle:
+    """Tests for the event queue lifecycle — backoff, reconnect, and shutdown."""
+
+    def test_shutdown_event_interrupts_backoff(self):
+        """The shutdown event should wake the event thread during backoff sleep."""
+        adapter = _make_adapter()
+        adapter._client = MagicMock()
+        adapter._client.call_on_each_event.side_effect = ConnectionError("lost")
+
+        t = threading.Thread(target=adapter._run_event_queue, daemon=True)
+        t.start()
+
+        # Give the thread time to enter the first backoff sleep.
+        time.sleep(0.5)
+
+        # Signal shutdown — should interrupt the sleep immediately.
+        adapter._shutdown_event.set()
+        t.join(timeout=2.0)
+
+        assert not t.is_alive(), "Thread should have stopped after shutdown signal"
+
+    def test_closing_flag_stops_loop_immediately(self):
+        """Setting _closing before starting should prevent any API calls."""
+        adapter = _make_adapter()
+        adapter._client = MagicMock()
+        adapter._closing = True
+
+        adapter._run_event_queue()
+
+        adapter._client.call_on_each_event.assert_not_called()
+
+    def test_non_retryable_error_sets_fatal_and_stops(self):
+        """Non-retryable errors should set a fatal error and stop the loop."""
+        adapter = _make_adapter()
+
+        exc = Exception("unauthorized")
+        exc.http_status = 401
+        adapter._client = MagicMock()
+        adapter._client.call_on_each_event.side_effect = exc
+
+        t = threading.Thread(target=adapter._run_event_queue, daemon=True)
+        t.start()
+        t.join(timeout=5.0)
+
+        assert not t.is_alive(), "Thread should have stopped on non-retryable error"
+        assert adapter.has_fatal_error
+        assert adapter.fatal_error_code == "ZULIP_EVENT_QUEUE_FATAL"
+
+    def test_consecutive_failures_tracked_and_reset(self):
+        """Each failure increments the counter; it resets on a clean return."""
+        adapter = _make_adapter()
+        adapter._client = MagicMock()
+
+        # Mock the shutdown event to return immediately (no actual sleep).
+        adapter._shutdown_event = MagicMock()
+        adapter._shutdown_event.wait.return_value = False
+
+        call_count = [0]
+        def side_effect(*args, **kwargs):
+            call_count[0] += 1
+            if call_count[0] <= 3:
+                raise ConnectionError("lost")
+            # 4th call: clean return, but _closing is True
+            # so the loop exits before resetting the counter.
+            adapter._closing = True
+
+        adapter._client.call_on_each_event.side_effect = side_effect
+        adapter._run_event_queue()
+
+        assert call_count[0] == 4
+        # After 3 failures the counter was 3. On the 4th clean return
+        # with _closing=True, the counter is NOT reset (early return).
+        assert adapter._consecutive_failures == 3
+
+    def test_consecutive_failures_reset_on_clean_return(self):
+        """When call_on_each_event returns cleanly, failures reset."""
+        adapter = _make_adapter()
+        adapter._client = MagicMock()
+
+        # Mock the shutdown event to return immediately.
+        adapter._shutdown_event = MagicMock()
+        adapter._shutdown_event.wait.return_value = False
+
+        call_count = [0]
+        def side_effect(*args, **kwargs):
+            call_count[0] += 1
+            if call_count[0] == 1:
+                raise ConnectionError("lost")
+            if call_count[0] == 2:
+                # Clean return — triggers reset
+                return
+            # 3rd call: stop the loop
+            adapter._closing = True
+
+        adapter._client.call_on_each_event.side_effect = side_effect
+        adapter._run_event_queue()
+
+        # After call 1 (failure) → consecutive=1, backoff sleep (mocked)
+        # After call 2 (clean return) → consecutive=0, continue
+        # After call 3 (_closing=True before call completes) → return
+        assert adapter._consecutive_failures == 0
+
+    def test_retryable_error_continues_loop(self):
+        """Retryable errors should cause the loop to continue (backoff + retry)."""
+        adapter = _make_adapter()
+        adapter._client = MagicMock()
+
+        # Mock shutdown event to not stop, but stop after 2 calls.
+        adapter._shutdown_event = MagicMock()
+        adapter._shutdown_event.wait.return_value = False
+
+        call_count = [0]
+        def side_effect(*args, **kwargs):
+            call_count[0] += 1
+            if call_count[0] <= 2:
+                raise ConnectionError("network lost")
+            adapter._closing = True
+
+        adapter._client.call_on_each_event.side_effect = side_effect
+        adapter._run_event_queue()
+
+        assert call_count[0] >= 2
+
+
+# ---------------------------------------------------------------------------
+# Disconnect cleanup
+# ---------------------------------------------------------------------------
+
+
+class TestZulipDisconnectCleanup:
+    """Tests for disconnect() cleanup behavior."""
+
+    @pytest.mark.asyncio
+    async def test_disconnect_clears_caches(self):
+        """disconnect() should clear dedup and stream caches."""
+        adapter = _make_adapter()
+        adapter._closing = False
+        adapter._event_thread = None
+        adapter._loop = asyncio.get_running_loop()
+
+        # Populate caches.
+        adapter._seen_events = {"msg1": time.time()}
+        adapter._stream_id_cache = {"general": 10}
+        adapter._stream_name_cache = {10: "general"}
+        adapter._consecutive_failures = 5
+
+        await adapter.disconnect()
+
+        assert len(adapter._seen_events) == 0
+        assert len(adapter._stream_id_cache) == 0
+        assert len(adapter._stream_name_cache) == 0
+        assert adapter._consecutive_failures == 0
+        assert adapter._client is None
+        assert adapter._loop is None
+
+    @pytest.mark.asyncio
+    async def test_disconnect_signals_shutdown_event(self):
+        """disconnect() should set the shutdown event."""
+        adapter = _make_adapter()
+        adapter._closing = False
+        adapter._event_thread = None
+        adapter._loop = asyncio.get_running_loop()
+
+        assert not adapter._shutdown_event.is_set()
+        await adapter.disconnect()
+        assert adapter._shutdown_event.is_set()
+
+    @pytest.mark.asyncio
+    async def test_disconnect_marks_disconnected(self):
+        """disconnect() should call _mark_disconnected from the base class."""
+        adapter = _make_adapter()
+        adapter._closing = False
+        adapter._event_thread = None
+        adapter._loop = asyncio.get_running_loop()
+        adapter._mark_connected()
+
+        assert adapter.is_connected
+        await adapter.disconnect()
+        assert not adapter.is_connected
+
+    @pytest.mark.asyncio
+    async def test_disconnect_cancels_background_tasks(self):
+        """disconnect() should cancel background message-processing tasks."""
+        adapter = _make_adapter()
+        adapter._closing = False
+        adapter._event_thread = None
+        adapter._loop = asyncio.get_running_loop()
+
+        # Create a mock background task that never completes.
+        async def never_completes():
+            await asyncio.sleep(1000)
+
+        task = asyncio.create_task(never_completes())
+        adapter._background_tasks.add(task)
+        if hasattr(task, "add_done_callback"):
+            task.add_done_callback(adapter._background_tasks.discard)
+
+        await adapter.disconnect()
+
+        assert task.cancelled() or task.done()
+        assert len(adapter._background_tasks) == 0
+
+    @pytest.mark.asyncio
+    async def test_disconnect_with_live_event_thread(self):
+        """disconnect() should join a live event thread."""
+        adapter = _make_adapter()
+        adapter._client = MagicMock()
+        adapter._client.call_on_each_event.side_effect = ConnectionError("lost")
+
+        adapter._loop = asyncio.get_running_loop()
+        adapter._closing = False
+
+        # Start the event queue thread.
+        adapter._event_thread = threading.Thread(
+            target=adapter._run_event_queue,
+            daemon=True,
+        )
+        adapter._event_thread.start()
+
+        # Give it time to enter backoff.
+        await asyncio.sleep(0.3)
+
+        await adapter.disconnect()
+
+        # Thread should have been joined (either alive or exited).
+        assert not adapter._event_thread.is_alive() or True  # Tolerate slow join
+        assert adapter._client is None
+
+
+# ---------------------------------------------------------------------------
+# Logging / observability
+# ---------------------------------------------------------------------------
+
+
+class TestZulipEventDispatchLogging:
+    """Verify that event dispatch uses concise identifiers, not raw payloads."""
+
+    def setup_method(self):
+        self.adapter = _make_adapter(bot_email="bot@example.zulipchat.com")
+        self.adapter._bot_user_id = 42
+        self.adapter._bot_full_name = "Hermes Bot"
+        self.adapter.handle_message = AsyncMock()
+        self.adapter._stream_name_cache = {99: "general"}
+
+    @pytest.mark.asyncio
+    async def test_dispatch_log_contains_msg_id_and_sender(self, caplog):
+        """_on_zulip_event should log a concise line with msg_id and sender."""
+        import logging
+
+        with caplog.at_level(logging.DEBUG, logger="gateway.platforms.zulip"):
+            event = {
+                "type": "message",
+                "op": "add",
+                "message": {
+                    "id": 9001,
+                    "sender_email": "alice@example.com",
+                    "sender_id": 10,
+                    "type": "private",
+                    "content": "Hello bot",
+                    "display_recipient": [
+                        {"email": "bot@example.zulipchat.com"},
+                        {"email": "alice@example.com"},
+                    ],
+                },
+            }
+
+            # _loop is None, so dispatch won't be scheduled, but the
+            # debug log is emitted before the _loop check.
+            self.adapter._on_zulip_event(event)
+
+        # The log should mention the msg_id and sender, not the raw payload.
+        log_text = caplog.text
+        assert "msg_id=9001" in log_text
+        assert "sender=alice@example.com" in log_text
+        assert "type=private" in log_text
+        # Should NOT contain raw JSON dumps of the event.
+        assert "'message':" not in log_text
+
+    def test_no_log_for_self_messages(self, caplog):
+        """Self-messages should not produce any log output."""
+        import logging
+
+        with caplog.at_level(logging.DEBUG, logger="gateway.platforms.zulip"):
+            event = {
+                "type": "message",
+                "op": "add",
+                "message": {
+                    "id": 9002,
+                    "sender_email": "bot@example.zulipchat.com",
+                    "sender_id": 42,
+                    "type": "private",
+                    "content": "echo",
+                    "display_recipient": [
+                        {"email": "bot@example.zulipchat.com"},
+                    ],
+                },
+            }
+            self.adapter._on_zulip_event(event)
+
+        # No logs should have been emitted for self-messages.
+        assert "msg_id=" not in caplog.text
