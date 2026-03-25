@@ -155,7 +155,7 @@ powershell.exe -NoProfile -Command "Add-Type -AssemblyName System.Windows.Forms;
 
 3. **X11 forwarding** — Connect with `ssh -X` to forward X11. This lets `xclip` on the remote machine access your local X11 clipboard. Requires an X server running locally (XQuartz on macOS, built-in on Linux X11 desktops). Slow for large images.
 
-4. **Use a messaging platform** — Send images to Hermes via Telegram, Discord, Slack, or WhatsApp. These platforms handle image upload natively and are not affected by clipboard/terminal limitations.
+4. **Use a messaging platform** — Send images to Hermes via Telegram, Discord, Slack, WhatsApp, or Zulip. These platforms handle image upload natively and are not affected by clipboard/terminal limitations.
 
 ## Why Terminals Can't Paste Images
 
