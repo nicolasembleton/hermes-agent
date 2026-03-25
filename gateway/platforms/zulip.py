@@ -24,12 +24,15 @@ Environment variables:
 from __future__ import annotations
 
 import asyncio
+import io
 import logging
+import mimetypes
 import os
 import random
 import re
 import threading
 import time
+from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 from gateway.config import Platform, PlatformConfig
@@ -38,6 +41,8 @@ from gateway.platforms.base import (
     MessageEvent,
     MessageType,
     SendResult,
+    cache_image_from_bytes,
+    cache_document_from_bytes,
 )
 
 logger = logging.getLogger(__name__)
@@ -531,6 +536,211 @@ class ZulipAdapter(BasePlatformAdapter):
         """
         content = re.sub(r"!\[([^\]]*)\]\(([^)]+)\)", r"\2", content)
         return content
+
+    # ------------------------------------------------------------------
+    # Rich delivery: images, documents, video
+    #
+    # Zulip supports file uploads via ``POST /user_uploads`` which returns
+    # a URI.  That URI is embedded in the message body using standard
+    # Markdown image/link syntax:
+    #
+    #   * Images:  ``![alt](/user_uploads/...)``  →  rendered inline
+    #   * Files:   ``[name](/user_uploads/...)``   →  rendered as link
+    #
+    # Voice messages have NO native representation in Zulip (no voice
+    # bubbles).  ``send_voice`` intentionally falls back to the base
+    # class, which sends the file path as text.
+    # ------------------------------------------------------------------
+
+    def _upload_file(
+        self,
+        file_bytes: bytes,
+        filename: str,
+    ) -> Optional[str]:
+        """Upload *file_bytes* to Zulip and return the public URI.
+
+        Returns the URI string on success (e.g. ``"/user_uploads/1/..."``),
+        or ``None`` on failure.  Logs a warning but never raises.
+        """
+        if not self._client:
+            logger.warning("Zulip: upload_file called while not connected")
+            return None
+
+        try:
+            # The Zulip client expects a file-like object.  ``upload_file``
+            # passes it to ``requests.post(files=[...])`` which reads the
+            # content and uses the ``.name`` attribute (if present) as the
+            # uploaded filename.  We wrap in ``BytesIO`` and set ``.name``
+            # so the server gets a proper filename.
+            buf = io.BytesIO(file_bytes)
+            buf.name = filename
+            result = self._client.upload_file(buf)
+            if result.get("result") == "success":
+                uri = result.get("uri", "")
+                if uri:
+                    return uri
+            logger.warning(
+                "Zulip: upload_file failed — %s",
+                result.get("msg", "unknown error"),
+            )
+        except Exception as exc:
+            logger.error("Zulip: upload_file exception — %s", exc)
+        return None
+
+    async def send_image(
+        self,
+        chat_id: str,
+        image_url: str,
+        caption: Optional[str] = None,
+        reply_to: Optional[str] = None,
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> SendResult:
+        """Download an image URL, upload to Zulip, and send inline.
+
+        Falls back to sending the URL as plain text if the download or
+        upload fails.
+        """
+        import httpx
+
+        try:
+            async with httpx.AsyncClient(
+                timeout=30.0, follow_redirects=True,
+            ) as client:
+                resp = await client.get(
+                    image_url,
+                    headers={
+                        "User-Agent": (
+                            "Mozilla/5.0 (compatible; HermesAgent/1.0)"
+                        ),
+                        "Accept": "image/*,*/*;q=0.8",
+                    },
+                )
+                resp.raise_for_status()
+                file_bytes = resp.content
+        except Exception as exc:
+            logger.warning(
+                "Zulip: failed to download image %s: %s", image_url, exc,
+            )
+            text = f"{caption}\n{image_url}" if caption else image_url
+            return await self.send(chat_id, content=text, reply_to=reply_to)
+
+        # Derive filename from URL path.
+        url_path = image_url.rsplit("/", 1)[-1].split("?")[0]
+        ext = Path(url_path).suffix.lower() or ".png"
+        filename = f"image{ext}"
+
+        uri = await asyncio.to_thread(
+            self._upload_file, file_bytes, filename,
+        )
+        if not uri:
+            # Upload failed — fall back to URL in text.
+            text = f"{caption}\n{image_url}" if caption else image_url
+            return await self.send(chat_id, content=text, reply_to=reply_to)
+
+        alt = caption or "image"
+        content = f"![{alt}]({uri})"
+        return await self.send(chat_id, content=content, reply_to=reply_to)
+
+    async def send_image_file(
+        self,
+        chat_id: str,
+        image_path: str,
+        caption: Optional[str] = None,
+        reply_to: Optional[str] = None,
+        **kwargs,
+    ) -> SendResult:
+        """Upload a local image file and send it inline."""
+        p = Path(image_path)
+        if not p.exists():
+            text = f"{caption or ''}\n(file not found: {image_path})".strip()
+            return await self.send(chat_id, content=text, reply_to=reply_to)
+
+        file_bytes = p.read_bytes()
+        filename = p.name
+
+        uri = await asyncio.to_thread(
+            self._upload_file, file_bytes, filename,
+        )
+        if not uri:
+            return SendResult(
+                success=False,
+                error="File upload failed",
+            )
+
+        alt = caption or "image"
+        content = f"![{alt}]({uri})"
+        return await self.send(chat_id, content=content, reply_to=reply_to)
+
+    async def send_document(
+        self,
+        chat_id: str,
+        file_path: str,
+        caption: Optional[str] = None,
+        file_name: Optional[str] = None,
+        reply_to: Optional[str] = None,
+        **kwargs,
+    ) -> SendResult:
+        """Upload a local file and send it as a downloadable attachment.
+
+        The file is presented as a Markdown link ``[filename](uri)`` in
+        the message body, with *caption* as optional surrounding text.
+        """
+        p = Path(file_path)
+        if not p.exists():
+            text = f"{caption or ''}\n(file not found: {file_path})".strip()
+            return await self.send(chat_id, content=text, reply_to=reply_to)
+
+        file_bytes = p.read_bytes()
+        filename = file_name or p.name
+
+        uri = await asyncio.to_thread(
+            self._upload_file, file_bytes, filename,
+        )
+        if not uri:
+            return SendResult(
+                success=False,
+                error="File upload failed",
+            )
+
+        # Format: optional caption + markdown link to uploaded file.
+        link = f"[{filename}]({uri})"
+        content = f"{caption}\n{link}" if caption else link
+        return await self.send(chat_id, content=content, reply_to=reply_to)
+
+    async def send_video(
+        self,
+        chat_id: str,
+        video_path: str,
+        caption: Optional[str] = None,
+        reply_to: Optional[str] = None,
+        **kwargs,
+    ) -> SendResult:
+        """Upload a video file and send it as a link.
+
+        Zulip does not inline video playback.  The uploaded file is
+        presented as a clickable Markdown link.  This is the best
+        representation Zulip can provide for video content.
+        """
+        p = Path(video_path)
+        if not p.exists():
+            text = f"{caption or ''}\n(file not found: {video_path})".strip()
+            return await self.send(chat_id, content=text, reply_to=reply_to)
+
+        file_bytes = p.read_bytes()
+        filename = p.name
+
+        uri = await asyncio.to_thread(
+            self._upload_file, file_bytes, filename,
+        )
+        if not uri:
+            return SendResult(
+                success=False,
+                error="Video upload failed",
+            )
+
+        link = f"[{filename}]({uri})"
+        content = f"{caption}\n{link}" if caption else link
+        return await self.send(chat_id, content=content, reply_to=reply_to)
 
     # ------------------------------------------------------------------
     # Internal: sending

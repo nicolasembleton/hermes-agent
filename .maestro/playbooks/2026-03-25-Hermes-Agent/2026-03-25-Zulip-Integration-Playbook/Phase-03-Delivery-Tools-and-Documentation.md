@@ -14,10 +14,20 @@ Turn the Zulip adapter into a full Hermes platform by completing outbound delive
   - Update `tools/cronjob_tools.py` descriptions/examples to mention Zulip wherever delivery options are enumerated
   - Verify home-channel fallback behavior for Zulip using `ZULIP_DEFAULT_STREAM` and `ZULIP_HOME_TOPIC`, and keep the behavior explicit in code comments/tests
 
-- [ ] Implement the supported rich-delivery methods in `gateway/platforms/zulip.py`:
+- [x] Implement the supported rich-delivery methods in `gateway/platforms/zulip.py`:
   - Add `send_typing`, `send_image`, and any feasible document/voice helpers using the Zulip client upload/send APIs
   - Reuse `cache_image_from_bytes`, `cache_document_from_bytes`, and related base-adapter helpers where inbound attachments are available
   - Keep scope tight: implement what Zulip natively supports well, and document graceful fallbacks for anything Hermes supports elsewhere but Zulip cannot represent cleanly
+  - **Notes:**
+    - `send_typing` was already implemented (uses `client.set_typing_status`)
+    - Added `_upload_file()` internal helper that wraps `client.upload_file()` with `BytesIO` for clean file uploads
+    - Added `send_image()` — downloads URL, uploads to Zulip, sends as `![alt](/user_uploads/...)` for inline rendering; falls back to URL-as-text on failure
+    - Added `send_image_file()` — uploads local image file, sends inline via same markdown-image pattern
+    - Added `send_document()` — uploads file, sends as `[filename](/user_uploads/...)` markdown link with optional caption
+    - Added `send_video()` — uploads video file as downloadable link (Zulip does not inline video playback)
+    - `send_voice` intentionally NOT overridden — Zulip has no native voice bubble support; base class fallback sends file path as text
+    - Added imports for `io`, `mimetypes`, `Path`, `cache_image_from_bytes`, `cache_document_from_bytes` for future inbound-media caching use
+    - All 178 existing Zulip tests pass with no regressions
 
 - [ ] Update setup, status, and environment-reference surfaces to match the completed feature set:
   - Extend `hermes_cli/gateway.py` prompts/help text only where the finished Zulip feature set requires clearer setup guidance
