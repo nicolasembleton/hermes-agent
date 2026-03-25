@@ -23,7 +23,7 @@ Build the smallest end-to-end Zulip integration that genuinely works inside Herm
    - Keep reconnection/backoff logic minimal but real, with readable helpers for chat-id parsing/formatting so later phases can extend media and typing cleanly
    - Notes: Created `gateway/platforms/zulip.py` (~470 lines) following Mattermost/Matrix patterns. Chat-ID encoding: stream messages use `"stream_id:topic"`, DMs use `"dm:sender_email"`. Six public helper functions for chat-ID parsing/formatting/round-tripping. Zulip's synchronous `call_on_each_event` runs in a daemon thread with `asyncio.call_soon_threadsafe()` for async dispatch. Stream messages require @mention of bot to trigger processing (DMs always processed). Includes self-message filtering (email+user_id), dedup cache, exponential-backoff reconnection, `edit_message()` support, `send_typing()`, stream-name caching, and configurable default stream/home topic. All 1428 existing gateway tests still pass.
 
-- [ ] Wire the prototype through the gateway runtime and agent surfaces:
+- [x] Wire the prototype through the gateway runtime and agent surfaces:
   - Update `gateway/run.py` to create the Zulip adapter and include Zulip in per-platform allowlist / allow-all authorization maps
   - Add a Zulip platform hint to `agent/prompt_builder.py` so the agent uses Zulip-friendly Markdown and understands streams + topics
   - Add a Zulip platform toolset in `toolsets.py` and include it in `hermes-gateway`
