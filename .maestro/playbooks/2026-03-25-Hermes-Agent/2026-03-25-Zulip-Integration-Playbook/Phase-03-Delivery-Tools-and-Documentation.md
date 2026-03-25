@@ -66,7 +66,12 @@ Turn the Zulip adapter into a full Hermes platform by completing outbound delive
     - Cron-delivery tool descriptions (`cronjob_tools.py`) and scheduler (`scheduler.py`) already included Zulip from Phase 02 — no changes needed
     - All 271 tests pass across the three test files (`test_zulip.py`: 201 passed, `test_send_message_tool.py`: 50 passed, `test_delivery.py`: 20 passed)
 
-- [ ] Run verification for tooling + docs-sensitive changes:
+- [x] Run verification for tooling + docs-sensitive changes:
   - Run `source venv/bin/activate && python -m pytest tests/gateway/test_zulip.py tests/tools/test_send_message_tool.py tests/gateway/test_delivery.py -q`
   - Run `source venv/bin/activate && python -m compileall gateway tools hermes_cli tests`
   - Manually open the changed docs files and confirm every Zulip env var/example matches the implemented names exactly
+  - **Notes:**
+    - All 271 tests pass: `test_zulip.py` (201 passed), `test_send_message_tool.py` (50 passed), `test_delivery.py` (20 passed)
+    - `compileall` passes cleanly across gateway, tools, hermes_cli, tests (no syntax errors)
+    - All 10 Zulip env vars verified consistent across implementation (zulip.py), config (config.py), docs (environment-variables.md, zulip.md, messaging/index.md), and setup (gateway.py): `ZULIP_SITE_URL`, `ZULIP_BOT_EMAIL`, `ZULIP_API_KEY`, `ZULIP_ALLOWED_USERS`, `ZULIP_ALLOW_ALL_USERS`, `ZULIP_DEFAULT_STREAM`, `ZULIP_HOME_TOPIC`, `ZULIP_HOME_CHANNEL`, `ZULIP_REQUIRE_MENTION`, `ZULIP_FREE_RESPONSE_STREAMS`
+    - `ZULIP_EVENT_QUEUE_FATAL` confirmed as internal error code string (not an env var)
