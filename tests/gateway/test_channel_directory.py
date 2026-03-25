@@ -10,6 +10,7 @@ from gateway.channel_directory import (
     format_directory_for_display,
     load_directory,
     _build_from_sessions,
+    _session_entry_name,
     DIRECTORY_PATH,
 )
 
@@ -250,3 +251,182 @@ class TestFormatDirectoryForDisplay:
         assert "Discord (Server1):" in result
         assert "Discord (Server2):" in result
         assert "discord:#general" in result
+
+
+class TestZulipSessionDiscovery:
+    """Tests for Zulip session-based channel discovery."""
+
+    def test_zulip_discovered_from_sessions(self, tmp_path):
+        sessions_path = tmp_path / "sessions" / "sessions.json"
+        sessions_path.parent.mkdir(parents=True)
+        sessions_path.write_text(json.dumps({
+            "dm_session": {
+                "origin": {
+                    "platform": "zulip",
+                    "chat_id": "dm:alice@example.com",
+                    "chat_name": "alice@example.com",
+                },
+                "chat_type": "dm",
+            },
+            "stream_session": {
+                "origin": {
+                    "platform": "zulip",
+                    "chat_id": "42:API Design",
+                    "chat_name": "engineering",
+                    "chat_topic": "API Design",
+                },
+                "chat_type": "stream",
+            },
+        }))
+
+        with patch.dict(os.environ, {"HERMES_HOME": str(tmp_path)}):
+            entries = _build_from_sessions("zulip")
+
+        assert len(entries) == 2
+        types = {e["type"] for e in entries}
+        assert "dm" in types
+        assert "stream" in types
+
+    def test_zulip_dm_uses_email_as_name(self, tmp_path):
+        sessions_path = tmp_path / "sessions" / "sessions.json"
+        sessions_path.parent.mkdir(parents=True)
+        sessions_path.write_text(json.dumps({
+            "s1": {
+                "origin": {
+                    "platform": "zulip",
+                    "chat_id": "dm:bob@example.com",
+                    "chat_name": "bob@example.com",
+                },
+                "chat_type": "dm",
+            },
+        }))
+
+        with patch.dict(os.environ, {"HERMES_HOME": str(tmp_path)}):
+            entries = _build_from_sessions("zulip")
+
+        assert len(entries) == 1
+        assert entries[0]["name"] == "bob@example.com"
+        assert entries[0]["id"] == "dm:bob@example.com"
+        assert entries[0]["type"] == "dm"
+
+    def test_zulip_group_dm_discovered(self, tmp_path):
+        sessions_path = tmp_path / "sessions" / "sessions.json"
+        sessions_path.parent.mkdir(parents=True)
+        sessions_path.write_text(json.dumps({
+            "s1": {
+                "origin": {
+                    "platform": "zulip",
+                    "chat_id": "group_dm:alice@example.com,bob@example.com",
+                    "chat_name": "alice@example.com, bob@example.com",
+                },
+                "chat_type": "group",
+            },
+        }))
+
+        with patch.dict(os.environ, {"HERMES_HOME": str(tmp_path)}):
+            entries = _build_from_sessions("zulip")
+
+        assert len(entries) == 1
+        assert entries[0]["type"] == "group"
+        assert "alice@example.com" in entries[0]["name"]
+
+    def test_zulip_no_sessions_returns_empty(self, tmp_path):
+        with patch.dict(os.environ, {"HERMES_HOME": str(tmp_path)}):
+            entries = _build_from_sessions("zulip")
+        assert entries == []
+
+
+class TestSessionEntryNameZulipTopics:
+    """Tests for _session_entry_name with Zulip-style stream/topic origin data."""
+
+    def test_stream_with_different_topic(self):
+        origin = {
+            "chat_id": "42:API Design",
+            "chat_name": "engineering",
+            "chat_topic": "API Design",
+            "chat_type": "stream",
+        }
+        assert _session_entry_name(origin) == "engineering / API Design"
+
+    def test_stream_topic_same_as_stream_name(self):
+        """When topic == stream name, do NOT add redundant suffix."""
+        origin = {
+            "chat_id": "42:general",
+            "chat_name": "general",
+            "chat_topic": "general",
+            "chat_type": "stream",
+        }
+        assert _session_entry_name(origin) == "general"
+
+    def test_stream_no_topic(self):
+        origin = {
+            "chat_id": "42:(no topic)",
+            "chat_name": "announcements",
+            "chat_type": "stream",
+        }
+        assert _session_entry_name(origin) == "announcements"
+
+    def test_stream_topic_with_parenthesized_topic(self):
+        origin = {
+            "chat_id": "99:(no topic)",
+            "chat_name": "random",
+            "chat_topic": "(no topic)",
+            "chat_type": "stream",
+        }
+        assert _session_entry_name(origin) == "random / (no topic)"
+
+    def test_dm_does_not_show_topic_suffix(self):
+        origin = {
+            "chat_id": "dm:alice@example.com",
+            "chat_name": "alice@example.com",
+            "chat_type": "dm",
+        }
+        assert _session_entry_name(origin) == "alice@example.com"
+
+    def test_channel_type_also_shows_topic(self):
+        origin = {
+            "chat_id": "101:deployment",
+            "chat_name": "devops",
+            "chat_topic": "deployment",
+            "chat_type": "channel",
+        }
+        assert _session_entry_name(origin) == "devops / deployment"
+
+    def test_thread_id_takes_priority_over_stream_topic(self):
+        """thread_id display should still work even when chat_topic is set."""
+        origin = {
+            "chat_id": "-1001:42",
+            "chat_name": "Coaching Chat",
+            "thread_id": "42",
+            "chat_topic": "AI Session",
+            "chat_type": "group",
+        }
+        assert _session_entry_name(origin) == "Coaching Chat / AI Session"
+
+    def test_group_dm_uses_chat_name(self):
+        origin = {
+            "chat_id": "group_dm:alice@example.com,bob@example.com",
+            "chat_name": "alice@example.com, bob@example.com",
+            "chat_type": "group",
+        }
+        assert _session_entry_name(origin) == "alice@example.com, bob@example.com"
+
+
+class TestZulipFormatDirectoryDisplay:
+    """Tests for Zulip entries in format_directory_for_display."""
+
+    def test_zulip_entries_displayed(self, tmp_path):
+        cache_file = _write_directory(tmp_path, {
+            "zulip": [
+                {"id": "dm:alice@example.com", "name": "alice@example.com", "type": "dm"},
+                {"id": "42:API Design", "name": "engineering / API Design", "type": "stream"},
+                {"id": "99:general", "name": "announcements", "type": "stream"},
+            ]
+        })
+        with patch("gateway.channel_directory.DIRECTORY_PATH", cache_file):
+            result = format_directory_for_display()
+
+        assert "Zulip:" in result
+        assert "zulip:alice@example.com" in result
+        assert "zulip:engineering / API Design" in result
+        assert "zulip:announcements" in result
