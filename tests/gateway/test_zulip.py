@@ -2976,3 +2976,519 @@ class TestZulipSubsystemIntegration:
         assert "ZULIP_API_KEY" in var_names
         assert "ZULIP_BOT_EMAIL" in var_names
         assert "ZULIP_SITE_URL" in var_names
+
+
+# ---------------------------------------------------------------------------
+# Rich delivery: media / send helpers
+# ---------------------------------------------------------------------------
+
+
+class TestZulipUploadFile:
+    """Verify _upload_file wraps the Zulip client upload correctly."""
+
+    def setup_method(self):
+        self.adapter = _make_adapter()
+        self.adapter._client = MagicMock()
+
+    def test_successful_upload_returns_uri(self):
+        """A successful upload should return the URI string."""
+        self.adapter._client.upload_file.return_value = {
+            "result": "success",
+            "uri": "/user_uploads/1/abc123/image.png",
+        }
+
+        result = self.adapter._upload_file(b"\x89PNG\r\n", "image.png")
+
+        assert result == "/user_uploads/1/abc123/image.png"
+        self.adapter._client.upload_file.assert_called_once()
+
+    def test_upload_sets_filename_on_bytesio(self):
+        """The BytesIO buffer should have .name set to the filename."""
+        self.adapter._client.upload_file.return_value = {
+            "result": "success",
+            "uri": "/user_uploads/1/xyz/file.pdf",
+        }
+
+        self.adapter._upload_file(b"PDF data", "report.pdf")
+
+        uploaded_buf = self.adapter._client.upload_file.call_args[0][0]
+        assert uploaded_buf.name == "report.pdf"
+
+    def test_failed_upload_returns_none(self):
+        """A failed upload result should return None."""
+        self.adapter._client.upload_file.return_value = {
+            "result": "error",
+            "msg": "File too large",
+        }
+
+        result = self.adapter._upload_file(b"x" * 100, "big.dat")
+
+        assert result is None
+
+    def test_upload_exception_returns_none(self):
+        """An exception during upload should return None (not raise)."""
+        self.adapter._client.upload_file.side_effect = ConnectionError("timeout")
+
+        result = self.adapter._upload_file(b"data", "file.txt")
+
+        assert result is None
+
+    def test_upload_without_client_returns_none(self):
+        """Uploading when not connected should return None."""
+        self.adapter._client = None
+
+        result = self.adapter._upload_file(b"data", "file.txt")
+
+        assert result is None
+
+
+class TestZulipSendTyping:
+    """Verify send_typing behavior for stream and DM targets."""
+
+    @pytest.mark.asyncio
+    async def test_typing_stream_with_cached_name(self):
+        """Typing in a stream should call set_typing_status with stream name."""
+        adapter = _make_adapter()
+        adapter._client = MagicMock()
+        adapter._stream_name_cache = {42: "general"}
+
+        await adapter.send_typing("42:some topic")
+
+        adapter._client.set_typing_status.assert_called_once_with({
+            "to": ["general"],
+            "op": "start",
+        })
+
+    @pytest.mark.asyncio
+    async def test_typing_dm(self):
+        """Typing in a DM should call set_typing_status with the email."""
+        adapter = _make_adapter()
+        adapter._client = MagicMock()
+
+        await adapter.send_typing("dm:alice@example.com")
+
+        adapter._client.set_typing_status.assert_called_once_with({
+            "to": ["alice@example.com"],
+            "op": "start",
+        })
+
+    @pytest.mark.asyncio
+    async def test_typing_without_client_is_silent(self):
+        """Typing without a connected client should not raise."""
+        adapter = _make_adapter()
+        adapter._client = None
+
+        await adapter.send_typing("42:general")  # Should not raise
+
+    @pytest.mark.asyncio
+    async def test_typing_stream_without_cache_is_silent(self):
+        """Typing for a stream not in the name cache should silently skip."""
+        adapter = _make_adapter()
+        adapter._client = MagicMock()
+        adapter._stream_name_cache = {}  # empty — no stream name for ID 99
+
+        await adapter.send_typing("99:topic")
+
+        adapter._client.set_typing_status.assert_not_called()
+
+
+class TestZulipSendImage:
+    """Verify send_image downloads, uploads, and sends inline."""
+
+    @pytest.mark.asyncio
+    async def test_send_image_success(self, tmp_path):
+        """Successful download + upload should produce an inline image message."""
+        adapter = _make_adapter()
+        adapter._client = MagicMock()
+        adapter._client.upload_file.return_value = {
+            "result": "success",
+            "uri": "/user_uploads/1/img/photo.png",
+        }
+        # send() → _do_send_message() → self._client.send_message()
+        adapter._client.send_message.return_value = {
+            "result": "success",
+            "id": 8001,
+        }
+
+        mock_response = MagicMock()
+        mock_response.content = b"\x89PNG\r\n\x1a\n"
+        mock_response.status_code = 200
+        mock_response.raise_for_status = MagicMock()
+
+        with patch("httpx.AsyncClient") as client_cls:
+            client_instance = AsyncMock()
+            client_instance.__aenter__ = AsyncMock(return_value=client_instance)
+            client_instance.__aexit__ = AsyncMock(return_value=False)
+            client_instance.get = AsyncMock(return_value=mock_response)
+            client_cls.return_value = client_instance
+
+            result = await adapter.send_image(
+                "42:general",
+                "https://example.com/photo.png",
+                caption="Here is a photo",
+            )
+
+        assert result.success is True
+        # The message body should contain the uploaded image URI.
+        # Note: format_message() strips ![alt](url) → url (Zulip auto-embeds
+        # /user_uploads/ URLs natively, so markdown image syntax is not needed).
+        call_args = adapter._client.send_message.call_args
+        assert call_args is not None
+        content = call_args[0][0]["content"]
+        assert "/user_uploads/1/img/photo.png" in content
+
+    @pytest.mark.asyncio
+    async def test_send_image_download_failure_falls_back_to_url(self, tmp_path):
+        """Failed download should fall back to sending the URL as text."""
+        adapter = _make_adapter()
+        adapter._client = MagicMock()
+        adapter._client.send_message.return_value = {
+            "result": "success",
+            "id": 999,
+        }
+
+        with patch("httpx.AsyncClient") as client_cls:
+            client_instance = AsyncMock()
+            client_instance.__aenter__ = AsyncMock(return_value=client_instance)
+            client_instance.__aexit__ = AsyncMock(return_value=False)
+            client_instance.get = AsyncMock(
+                side_effect=Exception("Connection refused")
+            )
+            client_cls.return_value = client_instance
+
+            result = await adapter.send_image(
+                "dm:alice@example.com",
+                "https://example.com/photo.png",
+            )
+
+        # Should fall back to URL as text, still succeed
+        assert result.success is True
+        call_args = adapter._client.send_message.call_args
+        content = call_args[0][0]["content"]
+        assert "https://example.com/photo.png" in content
+
+    @pytest.mark.asyncio
+    async def test_send_image_upload_failure_falls_back_to_url(self):
+        """Failed upload should fall back to sending the URL as text."""
+        adapter = _make_adapter()
+        adapter._client = MagicMock()
+        adapter._client.upload_file.return_value = {
+            "result": "error",
+            "msg": "Upload failed",
+        }
+        adapter._client.send_message.return_value = {
+            "result": "success",
+            "id": 888,
+        }
+
+        mock_response = MagicMock()
+        mock_response.content = b"\x89PNG\r\n\x1a\n"
+        mock_response.status_code = 200
+        mock_response.raise_for_status = MagicMock()
+
+        with patch("httpx.AsyncClient") as client_cls:
+            client_instance = AsyncMock()
+            client_instance.__aenter__ = AsyncMock(return_value=client_instance)
+            client_instance.__aexit__ = AsyncMock(return_value=False)
+            client_instance.get = AsyncMock(return_value=mock_response)
+            client_cls.return_value = client_instance
+
+            result = await adapter.send_image(
+                "42:general",
+                "https://example.com/broken.png",
+                caption="caption",
+            )
+
+        # Fallback: caption + URL in text
+        assert result.success is True
+        call_args = adapter._client.send_message.call_args
+        content = call_args[0][0]["content"]
+        assert "caption" in content
+        assert "https://example.com/broken.png" in content
+
+
+class TestZulipSendImageFile:
+    """Verify send_image_file uploads a local file and sends inline."""
+
+    @pytest.mark.asyncio
+    async def test_send_image_file_success(self, tmp_path):
+        """Existing local image file should be uploaded and sent inline."""
+        adapter = _make_adapter()
+        adapter._client = MagicMock()
+        adapter._client.upload_file.return_value = {
+            "result": "success",
+            "uri": "/user_uploads/1/local/photo.jpg",
+        }
+        adapter._client.send_message.return_value = {
+            "result": "success",
+            "id": 8002,
+        }
+
+        image_path = tmp_path / "photo.jpg"
+        image_path.write_bytes(b"\xff\xd8\xff\xe0" + b"\x00" * 32)
+
+        result = await adapter.send_image_file(
+            "42:general",
+            str(image_path),
+            caption="Local photo",
+        )
+
+        assert result.success is True
+        # Verify the message contains the uploaded image URI.
+        # Note: format_message() strips ![alt](url) → url, but Zulip
+        # auto-embeds /user_uploads/ URLs natively.
+        call_args = adapter._client.send_message.call_args
+        content = call_args[0][0]["content"]
+        assert "/user_uploads/1/local/photo.jpg" in content
+
+    @pytest.mark.asyncio
+    async def test_send_image_file_missing(self):
+        """Missing local file should send a file-not-found text message."""
+        adapter = _make_adapter()
+        adapter._client = MagicMock()
+        adapter._client.send_message.return_value = {
+            "result": "success",
+            "id": 777,
+        }
+
+        result = await adapter.send_image_file(
+            "42:general",
+            "/tmp/nonexistent_image.png",
+        )
+
+        # Should still succeed — sends a fallback text message
+        assert result.success is True
+        call_args = adapter._client.send_message.call_args
+        content = call_args[0][0]["content"]
+        assert "nonexistent_image.png" in content
+
+    @pytest.mark.asyncio
+    async def test_send_image_file_upload_failure(self, tmp_path):
+        """Failed upload should return an error SendResult."""
+        adapter = _make_adapter()
+        adapter._client = MagicMock()
+        adapter._client.upload_file.return_value = {
+            "result": "error",
+            "msg": "Server error",
+        }
+
+        image_path = tmp_path / "fail.png"
+        image_path.write_bytes(b"\x89PNG\r\n\x1a\n")
+
+        result = await adapter.send_image_file(
+            "42:general",
+            str(image_path),
+        )
+
+        assert result.success is False
+        assert "upload" in result.error.lower() or "failed" in result.error.lower()
+
+
+class TestZulipSendDocument:
+    """Verify send_document uploads a file and sends as a markdown link."""
+
+    @pytest.mark.asyncio
+    async def test_send_document_success(self, tmp_path):
+        """Existing local file should be uploaded and sent as a markdown link."""
+        adapter = _make_adapter()
+        adapter._client = MagicMock()
+        adapter._client.upload_file.return_value = {
+            "result": "success",
+            "uri": "/user_uploads/1/docs/report.pdf",
+        }
+        adapter._client.send_message.return_value = {
+            "result": "success",
+            "id": 8003,
+        }
+
+        doc_path = tmp_path / "report.pdf"
+        doc_path.write_bytes(b"%PDF-1.4 test content")
+
+        result = await adapter.send_document(
+            "dm:alice@example.com",
+            str(doc_path),
+            caption="Q4 Report",
+        )
+
+        assert result.success is True
+        call_args = adapter._client.send_message.call_args
+        content = call_args[0][0]["content"]
+        assert "[report.pdf]" in content
+        assert "/user_uploads/1/docs/report.pdf" in content
+        assert "Q4 Report" in content
+
+    @pytest.mark.asyncio
+    async def test_send_document_no_caption(self, tmp_path):
+        """Document without caption should still produce a markdown link."""
+        adapter = _make_adapter()
+        adapter._client = MagicMock()
+        adapter._client.upload_file.return_value = {
+            "result": "success",
+            "uri": "/user_uploads/1/docs/data.csv",
+        }
+        adapter._client.send_message.return_value = {
+            "result": "success",
+            "id": 8004,
+        }
+
+        doc_path = tmp_path / "data.csv"
+        doc_path.write_bytes(b"id,name\n1,alice")
+
+        result = await adapter.send_document(
+            "42:general",
+            str(doc_path),
+        )
+
+        assert result.success is True
+        call_args = adapter._client.send_message.call_args
+        content = call_args[0][0]["content"]
+        assert "[data.csv]" in content
+
+    @pytest.mark.asyncio
+    async def test_send_document_missing_file(self):
+        """Missing file should send a file-not-found text message."""
+        adapter = _make_adapter()
+        adapter._client = MagicMock()
+        adapter._client.send_message.return_value = {
+            "result": "success",
+            "id": 666,
+        }
+
+        result = await adapter.send_document(
+            "42:general",
+            "/tmp/nonexistent.pdf",
+            caption="Missing report",
+        )
+
+        assert result.success is True
+        call_args = adapter._client.send_message.call_args
+        content = call_args[0][0]["content"]
+        assert "nonexistent.pdf" in content
+
+    @pytest.mark.asyncio
+    async def test_send_document_upload_failure(self, tmp_path):
+        """Failed upload should return an error SendResult."""
+        adapter = _make_adapter()
+        adapter._client = MagicMock()
+        adapter._client.upload_file.return_value = {
+            "result": "error",
+            "msg": "Storage full",
+        }
+
+        doc_path = tmp_path / "big.pdf"
+        doc_path.write_bytes(b"%PDF-1.4")
+
+        result = await adapter.send_document(
+            "dm:alice@example.com",
+            str(doc_path),
+        )
+
+        assert result.success is False
+        assert "failed" in result.error.lower()
+
+    @pytest.mark.asyncio
+    async def test_send_document_custom_filename(self, tmp_path):
+        """Custom file_name should override the local file name."""
+        adapter = _make_adapter()
+        adapter._client = MagicMock()
+        adapter._client.upload_file.return_value = {
+            "result": "success",
+            "uri": "/user_uploads/1/docs/custom.docx",
+        }
+        adapter._client.send_message.return_value = {
+            "result": "success",
+            "id": 8005,
+        }
+
+        doc_path = tmp_path / "temp_upload_xyz.tmp"
+        doc_path.write_bytes(b"doc content")
+
+        result = await adapter.send_document(
+            "42:general",
+            str(doc_path),
+            file_name="quarterly-report.docx",
+        )
+
+        assert result.success is True
+        # Verify upload was called with the custom filename
+        upload_buf = adapter._client.upload_file.call_args[0][0]
+        assert upload_buf.name == "quarterly-report.docx"
+        # Verify the message uses the custom filename in the link
+        call_args = adapter._client.send_message.call_args
+        content = call_args[0][0]["content"]
+        assert "[quarterly-report.docx]" in content
+
+
+class TestZulipSendVideo:
+    """Verify send_video uploads a video file and sends as a link."""
+
+    @pytest.mark.asyncio
+    async def test_send_video_success(self, tmp_path):
+        """Existing local video should be uploaded and sent as a link."""
+        adapter = _make_adapter()
+        adapter._client = MagicMock()
+        adapter._client.upload_file.return_value = {
+            "result": "success",
+            "uri": "/user_uploads/1/vid/demo.mp4",
+        }
+        adapter._client.send_message.return_value = {
+            "result": "success",
+            "id": 8006,
+        }
+
+        video_path = tmp_path / "demo.mp4"
+        video_path.write_bytes(b"\x00\x00\x00\x20ftypmp42")
+
+        result = await adapter.send_video(
+            "42:general",
+            str(video_path),
+            caption="Demo recording",
+        )
+
+        assert result.success is True
+        call_args = adapter._client.send_message.call_args
+        content = call_args[0][0]["content"]
+        assert "[demo.mp4]" in content
+        assert "/user_uploads/1/vid/demo.mp4" in content
+        assert "Demo recording" in content
+
+    @pytest.mark.asyncio
+    async def test_send_video_missing_file(self):
+        """Missing video file should send a file-not-found text message."""
+        adapter = _make_adapter()
+        adapter._client = MagicMock()
+        adapter._client.send_message.return_value = {
+            "result": "success",
+            "id": 555,
+        }
+
+        result = await adapter.send_video(
+            "42:general",
+            "/tmp/nonexistent.mp4",
+        )
+
+        assert result.success is True
+        call_args = adapter._client.send_message.call_args
+        content = call_args[0][0]["content"]
+        assert "nonexistent.mp4" in content
+
+    @pytest.mark.asyncio
+    async def test_send_video_upload_failure(self, tmp_path):
+        """Failed upload should return an error SendResult."""
+        adapter = _make_adapter()
+        adapter._client = MagicMock()
+        adapter._client.upload_file.return_value = {
+            "result": "error",
+            "msg": "File too large",
+        }
+
+        video_path = tmp_path / "big.mp4"
+        video_path.write_bytes(b"\x00\x00\x00\x20ftypmp42")
+
+        result = await adapter.send_video(
+            "dm:alice@example.com",
+            str(video_path),
+        )
+
+        assert result.success is False
+        assert "upload" in result.error.lower() or "failed" in result.error.lower()

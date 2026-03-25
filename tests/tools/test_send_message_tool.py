@@ -911,3 +911,122 @@ class TestSendMessageToolZulip:
             thread_id=None,
             media_files=[],
         )
+
+    def test_sends_to_explicit_group_dm_target(self):
+        """zulip:group_dm:a@b.com,c@d.com should route to the group DM sender."""
+        config, zulip_cfg = self._make_zulip_config()
+
+        with patch("gateway.config.load_gateway_config", return_value=config), \
+             patch("tools.interrupt.is_interrupted", return_value=False), \
+             patch("model_tools._run_async", side_effect=_run_async_immediately), \
+             patch("tools.send_message_tool._send_to_platform", new=AsyncMock(return_value={"success": True})) as send_mock:
+            result = json.loads(
+                send_message_tool({
+                    "action": "send",
+                    "target": "zulip:group_dm:a@b.com,c@d.com",
+                    "message": "group hello",
+                })
+            )
+
+        assert result["success"] is True
+        send_mock.assert_awaited_once_with(
+            Platform.ZULIP,
+            zulip_cfg,
+            "group_dm:a@b.com,c@d.com",
+            "group hello",
+            thread_id=None,
+            media_files=[],
+        )
+
+    def test_no_home_channel_returns_error(self):
+        """Sending to bare 'zulip' without a home channel should return an error."""
+        config, zulip_cfg = self._make_zulip_config(home_channel=None)
+
+        with patch("gateway.config.load_gateway_config", return_value=config), \
+             patch("tools.interrupt.is_interrupted", return_value=False), \
+             patch("model_tools._run_async", side_effect=_run_async_immediately):
+            result = json.loads(
+                send_message_tool({
+                    "action": "send",
+                    "target": "zulip",
+                    "message": "hello",
+                })
+            )
+
+        assert result.get("success") is not True
+        assert "No home channel" in result.get("error", "")
+
+    def test_cron_duplicate_zulip_target_is_skipped(self):
+        """Cron duplicate skip should work for Zulip targets."""
+        home = SimpleNamespace(chat_id="42:Home")
+        config, zulip_cfg = self._make_zulip_config(home_channel=home)
+
+        with patch.dict(
+            os.environ,
+            {
+                "HERMES_CRON_AUTO_DELIVER_PLATFORM": "zulip",
+                "HERMES_CRON_AUTO_DELIVER_CHAT_ID": "42:Home",
+            },
+            clear=False,
+        ), \
+             patch("gateway.config.load_gateway_config", return_value=config), \
+             patch("tools.interrupt.is_interrupted", return_value=False), \
+             patch("model_tools._run_async", side_effect=_run_async_immediately), \
+             patch("tools.send_message_tool._send_to_platform", new=AsyncMock(return_value={"success": True})) as send_mock, \
+             patch("gateway.mirror.mirror_to_session", return_value=True) as mirror_mock:
+            result = json.loads(
+                send_message_tool({
+                    "action": "send",
+                    "target": "zulip",
+                    "message": "cron duplicate check",
+                })
+            )
+
+        assert result["success"] is True
+        assert result["skipped"] is True
+        assert result["reason"] == "cron_auto_delivery_duplicate_target"
+        send_mock.assert_not_awaited()
+        mirror_mock.assert_not_called()
+
+    def test_zulip_media_files_produce_warning(self):
+        """Non-Telegram media attachments should produce a warning, not error."""
+        config, zulip_cfg = self._make_zulip_config()
+
+        with patch("gateway.config.load_gateway_config", return_value=config), \
+             patch("tools.interrupt.is_interrupted", return_value=False), \
+             patch("model_tools._run_async", side_effect=_run_async_immediately), \
+             patch("gateway.mirror.mirror_to_session", return_value=True), \
+             patch("tools.send_message_tool._send_zulip", new=AsyncMock(return_value={"success": True})) as send_zulip_mock:
+            # _send_to_platform routes to _send_zulip; media files are passed but
+            # Zulip doesn't support native media delivery — a warning should appear.
+            result = asyncio.run(
+                _send_to_platform(
+                    Platform.ZULIP,
+                    zulip_cfg,
+                    "123:General",
+                    "text with media",
+                    media_files=[("/tmp/photo.png", False)],
+                )
+            )
+
+        assert result["success"] is True
+        assert any("MEDIA" in w for w in result.get("warnings", []))
+
+    def test_zulip_unknown_platform_rejected(self):
+        """A gibberish platform name should be rejected with available list."""
+        config, _ = self._make_zulip_config()
+
+        with patch("gateway.config.load_gateway_config", return_value=config), \
+             patch("tools.interrupt.is_interrupted", return_value=False), \
+             patch("model_tools._run_async", side_effect=_run_async_immediately):
+            result = json.loads(
+                send_message_tool({
+                    "action": "send",
+                    "target": "notaplatform:123",
+                    "message": "hello",
+                })
+            )
+
+        assert result.get("success") is not True
+        assert "Unknown platform" in result.get("error", "")
+        assert "zulip" in result.get("error", "")

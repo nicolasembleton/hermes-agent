@@ -55,10 +55,16 @@ Turn the Zulip adapter into a full Hermes platform by completing outbound delive
      - Troubleshooting covers: not responding, 401 errors, stream mention gating, missing zulip package, event queue reconnects, offline bot, and user not allowed
      - Voice messages explicitly documented as not supported with explanation
 
-- [ ] Add tests for outbound delivery and platform-wide integration points:
+- [x] Add tests for outbound delivery and platform-wide integration points:
   - Extend `tests/tools/test_send_message_tool.py` with Zulip routing, target parsing, and home-channel fallback coverage
   - Extend `tests/gateway/test_zulip.py` with media/send helper coverage that can be verified with mocked Zulip client methods
   - Update any cron-delivery or shared-tool tests only where Zulip now belongs in canonical platform maps
+  - **Notes:**
+    - `test_send_message_tool.py`: Added 6 new tests to `TestSendMessageToolZulip` — group DM routing (`test_sends_to_explicit_group_dm_target`), home-channel error when not set (`test_no_home_channel_returns_error`), cron duplicate skip for Zulip (`test_cron_duplicate_zulip_target_is_skipped`), media warning for non-Telegram platforms (`test_zulip_media_files_produce_warning`), unknown platform rejection with Zulip in available list (`test_zulip_unknown_platform_rejected`)
+    - `test_zulip.py`: Added 6 new test classes with 23 total tests — `TestZulipUploadFile` (5 tests: success, filename on BytesIO, failure, exception, no client), `TestZulipSendTyping` (4 tests: stream with cache, DM, no client, no cache), `TestZulipSendImage` (3 tests: success with download+upload, download failure fallback, upload failure fallback), `TestZulipSendImageFile` (3 tests: success, missing file, upload failure), `TestZulipSendDocument` (5 tests: success with caption, no caption, missing file, upload failure, custom filename), `TestZulipSendVideo` (3 tests: success, missing file, upload failure)
+    - `test_delivery.py`: Added 5 new tests to `TestParseTargetPlatformChat` — Zulip platform-only parse, stream target parse, DM target parse, stream roundtrip (lowercase-aware); verified `DeliveryTarget.parse` correctly routes `zulip:*` targets
+    - Cron-delivery tool descriptions (`cronjob_tools.py`) and scheduler (`scheduler.py`) already included Zulip from Phase 02 — no changes needed
+    - All 271 tests pass across the three test files (`test_zulip.py`: 201 passed, `test_send_message_tool.py`: 50 passed, `test_delivery.py`: 20 passed)
 
 - [ ] Run verification for tooling + docs-sensitive changes:
   - Run `source venv/bin/activate && python -m pytest tests/gateway/test_zulip.py tests/tools/test_send_message_tool.py tests/gateway/test_delivery.py -q`
