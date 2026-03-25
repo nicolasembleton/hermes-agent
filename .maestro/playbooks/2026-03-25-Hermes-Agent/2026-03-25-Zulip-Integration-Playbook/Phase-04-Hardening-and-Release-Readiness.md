@@ -104,10 +104,37 @@ Finish the Zulip integration to a production-ready standard: security redaction,
    - No fixes needed — all checks green.
    -->
 
-- [ ] Do a final readability and maintenance pass on all Zulip changes:
+- [x] Do a final readability and maintenance pass on all Zulip changes: <!-- MAESTRO: completed 2026-03-25 -->
   - Remove dead code, duplicated parsing helpers, stray debug output, and unused imports
   - Make sure helper names are explicit (`parse_zulip_chat_id`, `build_stream_topic_chat_id`, etc.) and comments explain Zulip-specific constraints rather than restating the code
   - Confirm all newly public helpers/types/docstrings are clear enough for the next contributor to extend safely
+
+  <!-- Readability pass notes:
+  - AUDITED 9 files with Zulip-specific changes:
+    * gateway/platforms/zulip.py (1128 lines) — main adapter
+    * tools/send_message_tool.py (857 lines) — Zulip target parsing + standalone sender
+    * gateway/run.py — Zulip entries in auth/toolset/config dicts
+    * gateway/config.py — Zulip env override block
+    * gateway/session.py — _PII_SAFE_PLATFORMS
+    * gateway/channel_directory.py — session discovery list
+    * agent/redact.py — _HTTPS_CREDENTIALS_RE pattern
+    * cron/scheduler.py — Zulip colon-handling
+    * toolsets.py — hermes-zulip definition
+  - ISSUES FOUND AND FIXED:
+    1. gateway/platforms/zulip.py line 29: Removed unused `import mimetypes`.
+       Not referenced anywhere in the file.
+  - NO OTHER ISSUES:
+    * No dead code or stray debug output
+    * No duplicated parsing helpers — send_message_tool.py correctly imports
+      and reuses adapter helpers (_parse_stream_chat_id, _parse_dm_chat_id,
+      _parse_group_dm_chat_id) for the standalone sender
+    * Helper naming is explicit and follows codebase conventions:
+      _build_stream_chat_id, _parse_dm_chat_id, is_dm_chat_id, etc.
+    * All docstrings are clear and explain Zulip-specific constraints
+    * Comments add value (explain WHY, not just WHAT)
+    * Public helpers (is_dm_chat_id, is_group_dm_chat_id, MAX_MESSAGE_LENGTH)
+      have clear docstrings
+  -->
 
 - [ ] Prepare the implementation for handoff without creating extra project files:
   - Review the changed file list and confirm it matches the intended scope from the discovery spec
