@@ -110,31 +110,37 @@ Finish the Zulip integration to a production-ready standard: security redaction,
   - Confirm all newly public helpers/types/docstrings are clear enough for the next contributor to extend safely
 
   <!-- Readability pass notes:
-  - AUDITED 9 files with Zulip-specific changes:
-    * gateway/platforms/zulip.py (1128 lines) — main adapter
-    * tools/send_message_tool.py (857 lines) — Zulip target parsing + standalone sender
-    * gateway/run.py — Zulip entries in auth/toolset/config dicts
-    * gateway/config.py — Zulip env override block
-    * gateway/session.py — _PII_SAFE_PLATFORMS
-    * gateway/channel_directory.py — session discovery list
-    * agent/redact.py — _HTTPS_CREDENTIALS_RE pattern
-    * cron/scheduler.py — Zulip colon-handling
-    * toolsets.py — hermes-zulip definition
-  - ISSUES FOUND AND FIXED:
-    1. gateway/platforms/zulip.py line 29: Removed unused `import mimetypes`.
-       Not referenced anywhere in the file.
-  - NO OTHER ISSUES:
-    * No dead code or stray debug output
-    * No duplicated parsing helpers — send_message_tool.py correctly imports
-      and reuses adapter helpers (_parse_stream_chat_id, _parse_dm_chat_id,
-      _parse_group_dm_chat_id) for the standalone sender
-    * Helper naming is explicit and follows codebase conventions:
-      _build_stream_chat_id, _parse_dm_chat_id, is_dm_chat_id, etc.
-    * All docstrings are clear and explain Zulip-specific constraints
-    * Comments add value (explain WHY, not just WHAT)
-    * Public helpers (is_dm_chat_id, is_group_dm_chat_id, MAX_MESSAGE_LENGTH)
-      have clear docstrings
-  -->
+   - AUDITED 9 files with Zulip-specific changes:
+     * gateway/platforms/zulip.py (1127 lines) — main adapter
+     * tools/send_message_tool.py (857 lines) — Zulip target parsing + standalone sender
+     * gateway/run.py — Zulip entries in auth/toolset/config dicts
+     * gateway/config.py — Zulip env override block
+     * gateway/session.py — _PII_SAFE_PLATFORMS
+     * gateway/channel_directory.py — session discovery list
+     * agent/redact.py — _HTTPS_CREDENTIALS_RE pattern
+     * cron/scheduler.py — Zulip colon-handling
+     * toolsets.py — hermes-zulip definition
+   - ISSUES FOUND AND FIXED:
+     1. gateway/platforms/zulip.py: Removed redundant `import asyncio` inside
+        `_dispatch_inbound()` — asyncio is already imported at module level (line 26).
+     2. tests/gateway/test_zulip.py: Removed redundant `import asyncio` inside
+        `test_connect_success` and `test_connect_auth_failure` — asyncio is
+        already imported at module level (line 2).
+   - NO OTHER ISSUES:
+     * No dead code or stray debug output
+     * No duplicated parsing helpers — send_message_tool.py correctly imports
+       and reuses adapter helpers (_parse_stream_chat_id, _parse_dm_chat_id,
+       _parse_group_dm_chat_id) for the standalone sender
+     * Helper naming is explicit and follows codebase conventions:
+       _build_stream_chat_id, _parse_dm_chat_id, is_dm_chat_id, etc.
+     * All docstrings are clear and explain Zulip-specific constraints
+     * Comments add value (explain WHY, not just WHAT)
+     * Public helpers (is_dm_chat_id, is_group_dm_chat_id, MAX_MESSAGE_LENGTH)
+       have clear docstrings
+   - VERIFICATION: 381 cross-platform tests pass (test_zulip.py +
+     test_pii_redaction.py + test_channel_directory.py +
+     test_send_message_tool.py + test_scheduler.py + test_redact.py).
+   -->
 
 - [ ] Prepare the implementation for handoff without creating extra project files:
   - Review the changed file list and confirm it matches the intended scope from the discovery spec

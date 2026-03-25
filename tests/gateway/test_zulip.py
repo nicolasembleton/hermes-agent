@@ -400,8 +400,6 @@ class TestZulipConnect:
     @pytest.mark.asyncio
     async def test_connect_success(self):
         """connect() should create client, fetch profile, start event queue."""
-        import asyncio
-
         adapter = _make_adapter()
 
         mock_client = MagicMock()
@@ -452,8 +450,6 @@ class TestZulipConnect:
     @pytest.mark.asyncio
     async def test_connect_auth_failure(self):
         """connect() should return False when Zulip auth fails."""
-        import asyncio
-
         adapter = _make_adapter()
 
         mock_client = MagicMock()

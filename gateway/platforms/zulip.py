@@ -970,7 +970,6 @@ class ZulipAdapter(BasePlatformAdapter):
         Creates a :class:`MessageEvent` and dispatches it via
         ``self.handle_message()``.
         """
-        import asyncio
 
         # Determine message type and chat context.
         msg_type_name = message.get("type", "")  # "stream" or "private"
