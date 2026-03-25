@@ -478,6 +478,8 @@ class TestZulipSelfMessageFiltering:
     def test_filter_by_sender_email(self):
         """Messages from the bot's own email should be ignored."""
         event = {
+            "type": "message",
+            "op": "add",
             "message": {
                 "id": 100,
                 "sender_email": "bot@example.zulipchat.com",
@@ -496,6 +498,8 @@ class TestZulipSelfMessageFiltering:
     def test_filter_by_sender_id(self):
         """Messages from the bot's user ID should be ignored."""
         event = {
+            "type": "message",
+            "op": "add",
             "message": {
                 "id": 101,
                 "sender_email": "someone-else@example.com",
@@ -514,6 +518,8 @@ class TestZulipSelfMessageFiltering:
     def test_non_bot_messages_pass_through(self):
         """Messages from other users should not be filtered."""
         event = {
+            "type": "message",
+            "op": "add",
             "message": {
                 "id": 102,
                 "sender_email": "alice@example.com",
@@ -550,6 +556,8 @@ class TestZulipDedup:
     def test_duplicate_message_ignored(self):
         """The same message ID should be deduped."""
         event = {
+            "type": "message",
+            "op": "add",
             "message": {
                 "id": 200,
                 "sender_email": "alice@example.com",
@@ -573,6 +581,8 @@ class TestZulipDedup:
         """Different message IDs should both be recorded."""
         for mid in [300, 301]:
             event = {
+                "type": "message",
+                "op": "add",
                 "message": {
                     "id": mid,
                     "sender_email": "alice@example.com",
@@ -1134,3 +1144,507 @@ class TestZulipStreamCache:
 
         # Should not raise
         adapter._refresh_stream_cache()
+
+
+# ---------------------------------------------------------------------------
+# Group DM chat-ID helpers
+# ---------------------------------------------------------------------------
+
+
+class TestZulipGroupDmChatId:
+    def test_build_group_dm_chat_id(self):
+        from gateway.platforms.zulip import _build_group_dm_chat_id
+        result = _build_group_dm_chat_id(["alice@example.com", "bob@example.com"])
+        # Emails are sorted deterministically
+        assert result == "group_dm:alice@example.com,bob@example.com"
+
+    def test_build_group_dm_chat_id_sorts_emails(self):
+        from gateway.platforms.zulip import _build_group_dm_chat_id
+        result = _build_group_dm_chat_id(["charlie@example.com", "alice@example.com"])
+        assert result == "group_dm:alice@example.com,charlie@example.com"
+
+    def test_parse_group_dm_chat_id(self):
+        from gateway.platforms.zulip import _parse_group_dm_chat_id
+        result = _parse_group_dm_chat_id("group_dm:alice@example.com,bob@example.com")
+        assert result == ["alice@example.com", "bob@example.com"]
+
+    def test_parse_group_dm_chat_id_non_group_returns_none(self):
+        from gateway.platforms.zulip import _parse_group_dm_chat_id
+        assert _parse_group_dm_chat_id("42:general") is None
+        assert _parse_group_dm_chat_id("dm:alice@example.com") is None
+        assert _parse_group_dm_chat_id("group_dm:") is None
+
+    def test_is_group_dm_chat_id_true(self):
+        from gateway.platforms.zulip import is_group_dm_chat_id
+        assert is_group_dm_chat_id("group_dm:a@b.com,c@d.com") is True
+
+    def test_is_group_dm_chat_id_false(self):
+        from gateway.platforms.zulip import is_group_dm_chat_id
+        assert is_group_dm_chat_id("dm:alice@example.com") is False
+        assert is_group_dm_chat_id("42:general") is False
+
+    def test_group_dm_roundtrip(self):
+        from gateway.platforms.zulip import _build_group_dm_chat_id, _parse_group_dm_chat_id
+        emails = ["bob@example.com", "alice@example.com", "charlie@example.com"]
+        chat_id = _build_group_dm_chat_id(emails)
+        parsed = _parse_group_dm_chat_id(chat_id)
+        assert parsed == ["alice@example.com", "bob@example.com", "charlie@example.com"]
+
+
+# ---------------------------------------------------------------------------
+# DM recipient extraction
+# ---------------------------------------------------------------------------
+
+
+class TestExtractDmRecipients:
+    def test_one_on_one_dm(self):
+        from gateway.platforms.zulip import _extract_dm_recipients
+        display_recipient = [
+            {"email": "bot@example.com", "full_name": "Bot"},
+            {"email": "alice@example.com", "full_name": "Alice"},
+        ]
+        result = _extract_dm_recipients(display_recipient, "bot@example.com", "alice@example.com")
+        assert result == ["alice@example.com"]
+
+    def test_group_dm_extracts_all_non_bot(self):
+        from gateway.platforms.zulip import _extract_dm_recipients
+        display_recipient = [
+            {"email": "bot@example.com", "full_name": "Bot"},
+            {"email": "alice@example.com", "full_name": "Alice"},
+            {"email": "bob@example.com", "full_name": "Bob"},
+        ]
+        result = _extract_dm_recipients(display_recipient, "bot@example.com", "alice@example.com")
+        assert result == ["alice@example.com", "bob@example.com"]
+
+    def test_malformed_display_recipient_falls_back(self):
+        from gateway.platforms.zulip import _extract_dm_recipients
+        result = _extract_dm_recipients("not a list", "bot@example.com", "alice@example.com")
+        assert result == ["alice@example.com"]
+
+    def test_empty_display_recipient_falls_back(self):
+        from gateway.platforms.zulip import _extract_dm_recipients
+        result = _extract_dm_recipients(None, "bot@example.com", "sender@example.com")
+        assert result == ["sender@example.com"]
+
+    def test_display_recipient_missing_bot_excludes_no_one(self):
+        """When bot email isn't in the list, all entries are returned."""
+        from gateway.platforms.zulip import _extract_dm_recipients
+        display_recipient = [
+            {"email": "alice@example.com"},
+            {"email": "bob@example.com"},
+        ]
+        result = _extract_dm_recipients(display_recipient, "bot@example.com", "alice@example.com")
+        assert result == ["alice@example.com", "bob@example.com"]
+
+    def test_display_recipient_with_non_dict_entries(self):
+        """Non-dict entries in the list should be skipped gracefully."""
+        from gateway.platforms.zulip import _extract_dm_recipients
+        display_recipient = [
+            {"email": "bot@example.com"},
+            "not a dict",
+            {"email": "alice@example.com"},
+        ]
+        result = _extract_dm_recipients(display_recipient, "bot@example.com", "alice@example.com")
+        assert result == ["alice@example.com"]
+
+
+# ---------------------------------------------------------------------------
+# Stream name resolution (display_recipient fallback)
+# ---------------------------------------------------------------------------
+
+
+class TestResolveStreamName:
+    def test_cache_hit(self):
+        from gateway.platforms.zulip import _resolve_stream_name
+        message = {"display_recipient": "ignored"}
+        cache = {42: "general"}
+        assert _resolve_stream_name(message, 42, cache) == "general"
+
+    def test_fallback_to_display_recipient_string(self):
+        from gateway.platforms.zulip import _resolve_stream_name
+        message = {"display_recipient": "general"}
+        cache = {}
+        assert _resolve_stream_name(message, 42, cache) == "general"
+
+    def test_fallback_to_display_recipient_dict(self):
+        """Legacy Zulip: display_recipient is a dict for stream messages."""
+        from gateway.platforms.zulip import _resolve_stream_name
+        message = {"display_recipient": {"name": "general", "stream_id": 42}}
+        cache = {}
+        assert _resolve_stream_name(message, 42, cache) == "general"
+
+    def test_fallback_to_display_recipient_dict_missing_name(self):
+        from gateway.platforms.zulip import _resolve_stream_name
+        message = {"display_recipient": {"stream_id": 42}}
+        cache = {}
+        assert _resolve_stream_name(message, 42, cache) == "42"
+
+    def test_fallback_to_stream_id_string(self):
+        from gateway.platforms.zulip import _resolve_stream_name
+        message = {}
+        cache = {}
+        assert _resolve_stream_name(message, 42, cache) == "42"
+
+    def test_empty_display_recipient_string_falls_through(self):
+        from gateway.platforms.zulip import _resolve_stream_name
+        message = {"display_recipient": ""}
+        cache = {}
+        assert _resolve_stream_name(message, 42, cache) == "42"
+
+
+# ---------------------------------------------------------------------------
+# Event validation (defense in depth)
+# ---------------------------------------------------------------------------
+
+
+class TestZulipEventValidation:
+    """Test that _on_zulip_event validates event shape before processing."""
+
+    def setup_method(self):
+        self.adapter = _make_adapter(bot_email="bot@example.zulipchat.com")
+        self.adapter._bot_user_id = 42
+        self.adapter._bot_full_name = "Hermes Bot"
+        self.adapter._loop = None
+        self.adapter.handle_message = AsyncMock()
+
+    def test_non_message_event_type_ignored(self):
+        """Events with type != 'message' should be silently dropped."""
+        event = {"type": "heartbeat", "id": 1}
+        self.adapter._on_zulip_event(event)
+        self.adapter.handle_message.assert_not_called()
+        assert "1" not in self.adapter._seen_events
+
+    def test_reaction_event_ignored(self):
+        event = {"type": "reaction", "op": "add", "id": 2}
+        self.adapter._on_zulip_event(event)
+        self.adapter.handle_message.assert_not_called()
+
+    def test_message_event_with_non_add_op_ignored(self):
+        """Message events with op != 'add' should be dropped."""
+        event = {
+            "type": "message",
+            "op": "update",
+            "id": 3,
+            "message": {
+                "id": 500,
+                "sender_email": "alice@example.com",
+                "sender_id": 99,
+                "type": "private",
+                "content": "edited text",
+                "display_recipient": [
+                    {"email": "bot@example.zulipchat.com"},
+                    {"email": "alice@example.com"},
+                ],
+            },
+        }
+        self.adapter._on_zulip_event(event)
+        self.adapter.handle_message.assert_not_called()
+
+    def test_message_event_without_op_defaults_to_add(self):
+        """Missing 'op' should be treated as 'add' (new message)."""
+        event = {
+            "type": "message",
+            "id": 4,
+            "message": {
+                "id": 501,
+                "sender_email": "alice@example.com",
+                "sender_id": 99,
+                "type": "private",
+                "content": "Hello",
+                "display_recipient": [
+                    {"email": "bot@example.zulipchat.com"},
+                    {"email": "alice@example.com"},
+                ],
+            },
+        }
+        self.adapter._on_zulip_event(event)
+        # Should be recorded in seen events (not filtered)
+        assert "501" in self.adapter._seen_events
+
+    def test_message_event_with_none_message_ignored(self):
+        event = {"type": "message", "op": "add", "message": None}
+        self.adapter._on_zulip_event(event)
+        self.adapter.handle_message.assert_not_called()
+
+    def test_message_event_with_non_dict_message_ignored(self):
+        event = {"type": "message", "op": "add", "message": "not a dict"}
+        self.adapter._on_zulip_event(event)
+        self.adapter.handle_message.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# Whitespace-only content filtering
+# ---------------------------------------------------------------------------
+
+
+class TestWhitespaceContentFiltering:
+    def setup_method(self):
+        self.adapter = _make_adapter(bot_email="bot@example.zulipchat.com")
+        self.adapter._bot_user_id = 42
+        self.adapter._bot_full_name = "Hermes Bot"
+        self.adapter.handle_message = AsyncMock()
+
+    @pytest.mark.asyncio
+    async def test_whitespace_only_dm_ignored(self):
+        """DMs with only whitespace should not dispatch."""
+        message = {
+            "id": 600,
+            "sender_email": "alice@example.com",
+            "sender_full_name": "Alice",
+            "sender_id": 10,
+            "type": "private",
+            "content": "   \t\n  ",
+            "display_recipient": [
+                {"email": "bot@example.zulipchat.com"},
+                {"email": "alice@example.com"},
+            ],
+        }
+        event = {"type": "message", "op": "add", "message": message}
+
+        self.adapter._dispatch_inbound(message, event)
+        self.adapter.handle_message.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_whitespace_only_stream_ignored(self):
+        """Stream messages with only whitespace should not dispatch."""
+        message = {
+            "id": 601,
+            "sender_email": "alice@example.com",
+            "sender_full_name": "Alice",
+            "sender_id": 10,
+            "type": "stream",
+            "stream_id": 99,
+            "subject": "general",
+            "content": "  ",
+        }
+        event = {"type": "message", "op": "add", "message": message}
+
+        self.adapter._dispatch_inbound(message, event)
+        self.adapter.handle_message.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_content_with_actual_text_passes(self):
+        """Content with non-whitespace text should pass through."""
+        message = {
+            "id": 602,
+            "sender_email": "alice@example.com",
+            "sender_full_name": "Alice",
+            "sender_id": 10,
+            "type": "private",
+            "content": "  Hello!  ",
+            "display_recipient": [
+                {"email": "bot@example.zulipchat.com"},
+                {"email": "alice@example.com"},
+            ],
+        }
+        event = {"type": "message", "op": "add", "message": message}
+
+        self.adapter._dispatch_inbound(message, event)
+        assert self.adapter.handle_message.called
+
+
+# ---------------------------------------------------------------------------
+# Group DM inbound dispatch
+# ---------------------------------------------------------------------------
+
+
+class TestGroupDmDispatch:
+    def setup_method(self):
+        self.adapter = _make_adapter(bot_email="bot@example.zulipchat.com")
+        self.adapter._bot_user_id = 42
+        self.adapter._bot_full_name = "Hermes Bot"
+        self.adapter.handle_message = AsyncMock()
+
+    @pytest.mark.asyncio
+    async def test_group_dm_creates_group_type(self):
+        """Private message with 3+ total participants should be 'group' type."""
+        message = {
+            "id": 700,
+            "sender_email": "alice@example.com",
+            "sender_full_name": "Alice",
+            "sender_id": 10,
+            "type": "private",
+            "content": "Hello group",
+            "display_recipient": [
+                {"email": "bot@example.zulipchat.com"},
+                {"email": "alice@example.com"},
+                {"email": "bob@example.com"},
+            ],
+        }
+        event = {"type": "message", "op": "add", "message": message}
+
+        self.adapter._dispatch_inbound(message, event)
+
+        assert self.adapter.handle_message.called
+        msg_event = self.adapter.handle_message.call_args[0][0]
+        assert msg_event.source.chat_type == "group"
+        assert msg_event.source.user_id == "alice@example.com"
+        assert msg_event.source.user_name == "Alice"
+        # chat_id should be deterministic group DM id
+        assert "group_dm:" in msg_event.source.chat_id
+        assert "alice@example.com" in msg_event.source.chat_id
+        assert "bob@example.com" in msg_event.source.chat_id
+
+    @pytest.mark.asyncio
+    async def test_group_dm_deterministic_chat_id(self):
+        """Group DM chat_id should be the same regardless of participant order."""
+        from gateway.platforms.zulip import _build_group_dm_chat_id
+
+        emails_a = ["bob@example.com", "alice@example.com"]
+        emails_b = ["alice@example.com", "bob@example.com"]
+        assert _build_group_dm_chat_id(emails_a) == _build_group_dm_chat_id(emails_b)
+
+    @pytest.mark.asyncio
+    async def test_one_on_one_dm_still_dm_type(self):
+        """Private message with exactly 2 participants should remain 'dm' type."""
+        message = {
+            "id": 701,
+            "sender_email": "alice@example.com",
+            "sender_full_name": "Alice",
+            "sender_id": 10,
+            "type": "private",
+            "content": "Hello",
+            "display_recipient": [
+                {"email": "bot@example.zulipchat.com"},
+                {"email": "alice@example.com"},
+            ],
+        }
+        event = {"type": "message", "op": "add", "message": message}
+
+        self.adapter._dispatch_inbound(message, event)
+
+        msg_event = self.adapter.handle_message.call_args[0][0]
+        assert msg_event.source.chat_type == "dm"
+        assert msg_event.source.chat_id == "dm:alice@example.com"
+
+
+# ---------------------------------------------------------------------------
+# Stream name via display_recipient
+# ---------------------------------------------------------------------------
+
+
+class TestStreamNameFromDisplayRecipient:
+    def setup_method(self):
+        self.adapter = _make_adapter(bot_email="bot@example.zulipchat.com")
+        self.adapter._bot_user_id = 42
+        self.adapter._bot_full_name = "Hermes Bot"
+        self.adapter.handle_message = AsyncMock()
+        # Empty cache — forces fallback to display_recipient
+        self.adapter._stream_name_cache = {}
+
+    @pytest.mark.asyncio
+    async def test_stream_name_from_display_recipient_string(self):
+        """When cache is empty, fall back to display_recipient string."""
+        message = {
+            "id": 800,
+            "sender_email": "alice@example.com",
+            "sender_full_name": "Alice",
+            "sender_id": 10,
+            "type": "stream",
+            "stream_id": 99,
+            "subject": "help",
+            "content": "@**Hermes Bot** help",
+            "display_recipient": "general",
+        }
+        event = {"type": "message", "op": "add", "message": message}
+
+        self.adapter._dispatch_inbound(message, event)
+
+        msg_event = self.adapter.handle_message.call_args[0][0]
+        assert msg_event.source.chat_name == "general"
+
+    @pytest.mark.asyncio
+    async def test_stream_name_from_display_recipient_dict(self):
+        """Legacy Zulip: display_recipient is a dict for stream messages."""
+        message = {
+            "id": 801,
+            "sender_email": "alice@example.com",
+            "sender_full_name": "Alice",
+            "sender_id": 10,
+            "type": "stream",
+            "stream_id": 99,
+            "subject": "help",
+            "content": "@**Hermes Bot** help",
+            "display_recipient": {"name": "general", "stream_id": 99},
+        }
+        event = {"type": "message", "op": "add", "message": message}
+
+        self.adapter._dispatch_inbound(message, event)
+
+        msg_event = self.adapter.handle_message.call_args[0][0]
+        assert msg_event.source.chat_name == "general"
+
+    @pytest.mark.asyncio
+    async def test_stream_name_fallback_to_id_when_no_display_recipient(self):
+        """When cache is empty and no display_recipient, use stream_id."""
+        message = {
+            "id": 802,
+            "sender_email": "alice@example.com",
+            "sender_full_name": "Alice",
+            "sender_id": 10,
+            "type": "stream",
+            "stream_id": 99,
+            "subject": "help",
+            "content": "@**Hermes Bot** help",
+        }
+        event = {"type": "message", "op": "add", "message": message}
+
+        self.adapter._dispatch_inbound(message, event)
+
+        msg_event = self.adapter.handle_message.call_args[0][0]
+        assert msg_event.source.chat_name == "99"
+
+
+# ---------------------------------------------------------------------------
+# Missing/empty subject field
+# ---------------------------------------------------------------------------
+
+
+class TestMissingSubjectField:
+    def setup_method(self):
+        self.adapter = _make_adapter(bot_email="bot@example.zulipchat.com")
+        self.adapter._bot_user_id = 42
+        self.adapter._bot_full_name = "Hermes Bot"
+        self.adapter.handle_message = AsyncMock()
+        self.adapter._stream_name_cache = {99: "general"}
+
+    @pytest.mark.asyncio
+    async def test_missing_subject_defaults(self):
+        """Stream messages missing 'subject' should use '(no topic)'."""
+        message = {
+            "id": 900,
+            "sender_email": "alice@example.com",
+            "sender_full_name": "Alice",
+            "sender_id": 10,
+            "type": "stream",
+            "stream_id": 99,
+            # No 'subject' field
+            "content": "@**Hermes Bot** help",
+        }
+        event = {"type": "message", "op": "add", "message": message}
+
+        self.adapter._dispatch_inbound(message, event)
+
+        msg_event = self.adapter.handle_message.call_args[0][0]
+        assert msg_event.source.chat_topic == "(no topic)"
+        assert msg_event.source.chat_id == "99:(no topic)"
+
+    @pytest.mark.asyncio
+    async def test_empty_subject_defaults(self):
+        """Stream messages with empty 'subject' should use '(no topic)'."""
+        message = {
+            "id": 901,
+            "sender_email": "alice@example.com",
+            "sender_full_name": "Alice",
+            "sender_id": 10,
+            "type": "stream",
+            "stream_id": 99,
+            "subject": "",
+            "content": "@**Hermes Bot** help",
+        }
+        event = {"type": "message", "op": "add", "message": message}
+
+        self.adapter._dispatch_inbound(message, event)
+
+        msg_event = self.adapter.handle_message.call_args[0][0]
+        assert msg_event.source.chat_topic == "(no topic)"

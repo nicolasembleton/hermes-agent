@@ -58,6 +58,7 @@ _RECONNECT_JITTER = 0.2
 # ---------------------------------------------------------------------------
 
 _DM_PREFIX = "dm:"
+_GROUP_DM_PREFIX = "group_dm:"
 
 
 def _build_stream_chat_id(stream_id: int, topic: str) -> str:
@@ -106,6 +107,85 @@ def _parse_dm_chat_id(chat_id: str) -> Optional[str]:
 def is_dm_chat_id(chat_id: str) -> bool:
     """Return True if *chat_id* represents a DM conversation."""
     return chat_id.startswith(_DM_PREFIX)
+
+
+def _build_group_dm_chat_id(participant_emails: list) -> str:
+    """Encode a group DM (3+ participants) as a stable chat ID.
+
+    Sorts emails for deterministic round-tripping regardless of the order
+    in which Zulip delivers the participant list.
+
+    Format: ``"group_dm:email1@example.com,email2@example.com,..."``
+    """
+    sorted_emails = sorted(participant_emails)
+    return f"{_GROUP_DM_PREFIX}{','.join(sorted_emails)}"
+
+
+def _parse_group_dm_chat_id(chat_id: str) -> Optional[list]:
+    """Parse a group DM chat ID back into a sorted list of emails.
+
+    Returns ``None`` if *chat_id* does not look like a group DM chat ID.
+    """
+    if not chat_id.startswith(_GROUP_DM_PREFIX):
+        return None
+    emails_str = chat_id[len(_GROUP_DM_PREFIX):]
+    if not emails_str:
+        return None
+    return emails_str.split(",")
+
+
+def is_group_dm_chat_id(chat_id: str) -> bool:
+    """Return True if *chat_id* represents a group DM conversation."""
+    return chat_id.startswith(_GROUP_DM_PREFIX)
+
+
+def _extract_dm_recipients(
+    display_recipient: Any, bot_email: str, sender_email: str
+) -> list:
+    """Extract DM participant emails from ``display_recipient``.
+
+    For 1:1 DMs, returns ``[other_user_email]``.
+    For group DMs (3+ users), returns all emails except the bot's.
+    Falls back to ``[sender_email]`` if the payload is malformed.
+    """
+    if isinstance(display_recipient, list):
+        emails = [
+            u.get("email", "")
+            for u in display_recipient
+            if isinstance(u, dict) and u.get("email") != bot_email
+        ]
+        if emails:
+            return emails
+
+    return [sender_email]
+
+
+def _resolve_stream_name(
+    message: Dict[str, Any],
+    stream_id: int,
+    stream_name_cache: Dict[int, str],
+) -> str:
+    """Get the stream name from cache or fall back to the message payload.
+
+    Zulip's ``display_recipient`` for stream messages is either:
+    - A string with the stream name (modern Zulip).
+    - A dict with a ``name`` key (legacy Zulip).
+
+    Falls back to ``str(stream_id)`` if nothing is available.
+    """
+    if stream_id in stream_name_cache:
+        return stream_name_cache[stream_id]
+
+    # Try display_recipient from the message payload.
+    dr = message.get("display_recipient")
+    if isinstance(dr, str) and dr:
+        return dr
+    if isinstance(dr, dict):
+        name = dr.get("name", "")
+        if name:
+            return name
+
+    return str(stream_id)
 
 
 # ---------------------------------------------------------------------------
@@ -482,9 +562,29 @@ class ZulipAdapter(BasePlatformAdapter):
         if self._closing:
             return
 
+        # Defense in depth: verify event shape.  The server-side filter
+        # should only deliver "message" events, but validate anyway.
+        event_type = event.get("type", "")
+        if event_type != "message":
+            logger.debug(
+                "Zulip: ignoring non-message event (type=%s)",
+                event_type,
+            )
+            return
+
+        event_op = event.get("op", "add")
+        if event_op != "add":
+            # Edits/deletes come through as different event types or
+            # ops — we only handle new-message creation.
+            logger.debug(
+                "Zulip: ignoring message event with op=%s",
+                event_op,
+            )
+            return
+
         # Extract message payload.
         message = event.get("message")
-        if not message:
+        if not message or not isinstance(message, dict):
             return
 
         # Dedup by Zulip message ID.
@@ -523,13 +623,17 @@ class ZulipAdapter(BasePlatformAdapter):
         sender_id = message.get("sender_id", -1)
         msg_id = str(message.get("id", ""))
 
+        # Reject whitespace-only content early (before type-specific logic).
+        if not content or not content.strip():
+            return
+
         if msg_type_name == "stream":
             stream_id = message.get("stream_id", -1)
-            topic = message.get("subject", "(no topic)")
+            topic = message.get("subject") or "(no topic)"
             chat_id = _build_stream_chat_id(stream_id, topic)
             chat_type = "stream"
-            chat_name = self._stream_name_cache.get(
-                stream_id, str(stream_id)
+            chat_name = _resolve_stream_name(
+                message, stream_id, self._stream_name_cache
             )
             chat_topic = topic
             user_id = sender_email
@@ -555,27 +659,26 @@ class ZulipAdapter(BasePlatformAdapter):
                 return
         elif msg_type_name == "private":
             display_recipient = message.get("display_recipient")
-            # For 1:1 DMs, display_recipient is a single-user list.
-            if isinstance(display_recipient, list):
-                for user in display_recipient:
-                    if isinstance(user, dict) and user.get("email") != self._bot_email:
-                        chat_id = _build_dm_chat_id(user["email"])
-                        break
-                else:
-                    chat_id = _build_dm_chat_id(sender_email)
-            else:
-                chat_id = _build_dm_chat_id(sender_email)
+            recipients = _extract_dm_recipients(
+                display_recipient, self._bot_email, sender_email
+            )
 
-            chat_type = "dm"
-            chat_name = sender_email
+            if len(recipients) > 1:
+                # Group DM (3+ original participants including bot).
+                chat_id = _build_group_dm_chat_id(recipients)
+                chat_type = "group"
+                chat_name = ", ".join(recipients)
+            else:
+                # 1:1 DM.
+                chat_id = _build_dm_chat_id(recipients[0] if recipients else sender_email)
+                chat_type = "dm"
+                chat_name = recipients[0] if recipients else sender_email
+
             chat_topic = None
             user_id = sender_email
             user_name = sender_full_name
         else:
             logger.debug("Zulip: ignoring message of type '%s'", msg_type_name)
-            return
-
-        if not content:
             return
 
         # Determine message_type.
