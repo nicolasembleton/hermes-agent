@@ -87,10 +87,22 @@ Finish the Zulip integration to a production-ready standard: security redaction,
     test_scheduler.py + test_redact.py).
   -->
 
-- [ ] Run the final verification matrix and fix failures before moving on:
-  - Run `source venv/bin/activate && python -m pytest tests/gateway/test_zulip.py tests/gateway/ tests/tools/test_send_message_tool.py -q`
-  - Run `source venv/bin/activate && python -m compileall agent gateway tools hermes_cli tests`
-  - If any repo-owned docs validation command is available for the touched messaging docs, run that too; otherwise manually check formatting/front matter consistency against adjacent platform docs
+- [x] Run the final verification matrix and fix failures before moving on: <!-- MAESTRO: completed 2026-03-25 -->
+   - Run `source venv/bin/activate && python -m pytest tests/gateway/test_zulip.py tests/gateway/ tests/tools/test_send_message_tool.py -q`
+   - Run `source venv/bin/activate && python -m compileall agent gateway tools hermes_cli tests`
+   - If any repo-owned docs validation command is available for the touched messaging docs, run that too; otherwise manually check formatting/front matter consistency against adjacent platform docs
+
+   <!-- Verification notes:
+   - pytest: 1701 passed, 21 skipped, 0 failures, 104 warnings (14.64s)
+   - compileall: Clean — all modules compiled successfully across agent/, gateway/, tools/, hermes_cli/, tests/
+   - Docs consistency verified for all touched files:
+     * website/docs/user-guide/messaging/zulip.md: Front matter consistent (sidebar_position, title, description format matches telegram.md/discord.md/slack.md)
+     * website/docs/reference/toolsets-reference.md: hermes-zulip row present at line 31, correct format
+     * website/docs/user-guide/features/vision.md: Zulip listed in messaging platforms at line 158
+     * website/docs/reference/faq.md: [zulip] in install example at line 351
+     * website/docs/user-guide/messaging/index.md: Zulip present in description, mermaid diagram (line 29), platform table (line 317), and Next Steps links (line 334)
+   - No fixes needed — all checks green.
+   -->
 
 - [ ] Do a final readability and maintenance pass on all Zulip changes:
   - Remove dead code, duplicated parsing helpers, stray debug output, and unused imports
