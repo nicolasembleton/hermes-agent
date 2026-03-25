@@ -1,11 +1,15 @@
 """Tests for Zulip platform adapter."""
 import asyncio
+import json
+import os
 import threading
 import time
 import pytest
+from pathlib import Path
 from unittest.mock import MagicMock, patch, AsyncMock
 
 from gateway.config import Platform, PlatformConfig
+from gateway.channel_directory import _build_from_sessions
 
 
 # ---------------------------------------------------------------------------
@@ -159,6 +163,14 @@ def _make_adapter(
     )
     adapter = ZulipAdapter(config)
     return adapter
+
+
+def _write_directory(tmp_path, platforms):
+    """Helper to write a fake channel directory cache file."""
+    data = {"updated_at": "2026-01-01T00:00:00", "platforms": platforms}
+    cache_file = tmp_path / "channel_directory.json"
+    cache_file.write_text(json.dumps(data))
+    return cache_file
 
 
 # ---------------------------------------------------------------------------
@@ -1961,3 +1973,1006 @@ class TestZulipEventDispatchLogging:
 
         # No logs should have been emitted for self-messages.
         assert "msg_id=" not in caplog.text
+
+
+# ---------------------------------------------------------------------------
+# Authorization regression — Zulip in _is_user_authorized maps
+# ---------------------------------------------------------------------------
+
+
+class TestZulipAuthorization:
+    """Regression tests: verify Zulip is wired into the gateway auth system."""
+
+    def test_zulip_in_authorization_maps(self):
+        """ZULIP_ALLOWED_USERS and ZULIP_ALLOW_ALL_USERS should be in the auth maps."""
+        import gateway.run
+        import inspect
+
+        source = inspect.getsource(gateway.run.GatewayRunner._is_user_authorized)
+        assert "ZULIP_ALLOWED_USERS" in source
+        assert "ZULIP_ALLOW_ALL_USERS" in source
+
+    def test_zulip_auth_with_no_allowlists(self, monkeypatch):
+        """With no allowlists set, Zulip user should NOT be authorized."""
+        from gateway.run import GatewayRunner
+        from gateway.config import GatewayConfig
+
+        monkeypatch.delenv("ZULIP_ALLOWED_USERS", raising=False)
+        monkeypatch.delenv("ZULIP_ALLOW_ALL_USERS", raising=False)
+        monkeypatch.delenv("GATEWAY_ALLOWED_USERS", raising=False)
+        monkeypatch.delenv("GATEWAY_ALLOW_ALL_USERS", raising=False)
+
+        gw = GatewayRunner.__new__(GatewayRunner)
+        gw.config = GatewayConfig()
+        gw.pairing_store = MagicMock()
+        gw.pairing_store.is_approved.return_value = False
+
+        source = MagicMock()
+        source.platform = Platform.ZULIP
+        source.user_id = "alice@example.com"
+
+        result = gw._is_user_authorized(source)
+        assert result is False
+
+    def test_zulip_auth_with_platform_allowlist(self, monkeypatch):
+        """ZULIP_ALLOWED_USERS should authorize listed email."""
+        from gateway.run import GatewayRunner
+        from gateway.config import GatewayConfig
+
+        monkeypatch.setenv("ZULIP_ALLOWED_USERS", "alice@example.com,bob@example.com")
+        monkeypatch.delenv("ZULIP_ALLOW_ALL_USERS", raising=False)
+        monkeypatch.delenv("GATEWAY_ALLOWED_USERS", raising=False)
+        monkeypatch.delenv("GATEWAY_ALLOW_ALL_USERS", raising=False)
+
+        gw = GatewayRunner.__new__(GatewayRunner)
+        gw.config = GatewayConfig()
+        gw.pairing_store = MagicMock()
+        gw.pairing_store.is_approved.return_value = False
+
+        source = MagicMock()
+        source.platform = Platform.ZULIP
+        source.user_id = "alice@example.com"
+
+        result = gw._is_user_authorized(source)
+        assert result is True
+
+    def test_zulip_auth_platform_allowlist_rejects_unlisted(self, monkeypatch):
+        """ZULIP_ALLOWED_USERS should reject users not in the list."""
+        from gateway.run import GatewayRunner
+        from gateway.config import GatewayConfig
+
+        monkeypatch.setenv("ZULIP_ALLOWED_USERS", "alice@example.com")
+        monkeypatch.delenv("ZULIP_ALLOW_ALL_USERS", raising=False)
+        monkeypatch.delenv("GATEWAY_ALLOWED_USERS", raising=False)
+        monkeypatch.delenv("GATEWAY_ALLOW_ALL_USERS", raising=False)
+
+        gw = GatewayRunner.__new__(GatewayRunner)
+        gw.config = GatewayConfig()
+        gw.pairing_store = MagicMock()
+        gw.pairing_store.is_approved.return_value = False
+
+        source = MagicMock()
+        source.platform = Platform.ZULIP
+        source.user_id = "eve@example.com"
+
+        result = gw._is_user_authorized(source)
+        assert result is False
+
+    def test_zulip_auth_allow_all_users(self, monkeypatch):
+        """ZULIP_ALLOW_ALL_USERS=true should authorize any Zulip user."""
+        from gateway.run import GatewayRunner
+        from gateway.config import GatewayConfig
+
+        monkeypatch.setenv("ZULIP_ALLOW_ALL_USERS", "true")
+        monkeypatch.delenv("ZULIP_ALLOWED_USERS", raising=False)
+        monkeypatch.delenv("GATEWAY_ALLOWED_USERS", raising=False)
+        monkeypatch.delenv("GATEWAY_ALLOW_ALL_USERS", raising=False)
+
+        gw = GatewayRunner.__new__(GatewayRunner)
+        gw.config = GatewayConfig()
+        gw.pairing_store = MagicMock()
+        gw.pairing_store.is_approved.return_value = False
+
+        source = MagicMock()
+        source.platform = Platform.ZULIP
+        source.user_id = "anyone@example.com"
+
+        result = gw._is_user_authorized(source)
+        assert result is True
+
+    def test_zulip_auth_with_global_allowlist(self, monkeypatch):
+        """GATEWAY_ALLOWED_USERS should also authorize Zulip users."""
+        from gateway.run import GatewayRunner
+        from gateway.config import GatewayConfig
+
+        monkeypatch.delenv("ZULIP_ALLOWED_USERS", raising=False)
+        monkeypatch.delenv("ZULIP_ALLOW_ALL_USERS", raising=False)
+        monkeypatch.setenv("GATEWAY_ALLOWED_USERS", "alice@example.com")
+        monkeypatch.delenv("GATEWAY_ALLOW_ALL_USERS", raising=False)
+
+        gw = GatewayRunner.__new__(GatewayRunner)
+        gw.config = GatewayConfig()
+        gw.pairing_store = MagicMock()
+        gw.pairing_store.is_approved.return_value = False
+
+        source = MagicMock()
+        source.platform = Platform.ZULIP
+        source.user_id = "alice@example.com"
+
+        result = gw._is_user_authorized(source)
+        assert result is True
+
+    def test_zulip_auth_paired_user(self, monkeypatch):
+        """A paired (DM-paired) Zulip user should be authorized."""
+        from gateway.run import GatewayRunner
+        from gateway.config import GatewayConfig
+
+        monkeypatch.delenv("ZULIP_ALLOWED_USERS", raising=False)
+        monkeypatch.delenv("ZULIP_ALLOW_ALL_USERS", raising=False)
+        monkeypatch.delenv("GATEWAY_ALLOWED_USERS", raising=False)
+        monkeypatch.delenv("GATEWAY_ALLOW_ALL_USERS", raising=False)
+
+        gw = GatewayRunner.__new__(GatewayRunner)
+        gw.config = GatewayConfig()
+        gw.pairing_store = MagicMock()
+        gw.pairing_store.is_approved.return_value = True
+
+        source = MagicMock()
+        source.platform = Platform.ZULIP
+        source.user_id = "alice@example.com"
+
+        result = gw._is_user_authorized(source)
+        assert result is True
+
+
+# ---------------------------------------------------------------------------
+# Stream send path
+# ---------------------------------------------------------------------------
+
+
+class TestZulipStreamSendPath:
+    """Verify that _do_send_message correctly handles stream chat IDs."""
+
+    def setup_method(self):
+        self.adapter = _make_adapter()
+        self.adapter._client = MagicMock()
+
+    def test_send_stream_parses_stream_id_and_topic(self):
+        """Stream chat IDs should send to the correct stream with topic."""
+        self.adapter._client.send_message.return_value = {
+            "result": "success",
+            "id": 2000,
+        }
+
+        result = self.adapter._do_send_message("42:general", "Hello stream!")
+
+        assert result.success is True
+        assert result.message_id == "2000"
+        call_args = self.adapter._client.send_message.call_args[0][0]
+        assert call_args["type"] == "stream"
+        assert call_args["to"] == "42"
+        assert call_args["topic"] == "general"
+        assert call_args["content"] == "Hello stream!"
+
+    def test_send_stream_with_complex_topic(self):
+        """Topics containing colons and spaces should be preserved."""
+        self.adapter._client.send_message.return_value = {
+            "result": "success",
+            "id": 2001,
+        }
+
+        result = self.adapter._do_send_message("5:time: 12:00", "check time")
+
+        assert result.success is True
+        call_args = self.adapter._client.send_message.call_args[0][0]
+        assert call_args["topic"] == "time: 12:00"
+
+    def test_send_stream_no_topic(self):
+        """Stream with empty topic should use '(no topic)' from parse."""
+        self.adapter._client.send_message.return_value = {
+            "result": "success",
+            "id": 2002,
+        }
+
+        result = self.adapter._do_send_message("42:", "hello")
+
+        assert result.success is True
+        call_args = self.adapter._client.send_message.call_args[0][0]
+        assert call_args["topic"] == "(no topic)"
+
+    def test_send_stream_api_failure(self):
+        """API errors on stream send return failed SendResult."""
+        self.adapter._client.send_message.return_value = {
+            "result": "error",
+            "msg": "Stream not found",
+        }
+
+        result = self.adapter._do_send_message("42:general", "fail")
+
+        assert result.success is False
+        assert "not found" in result.error
+
+    def test_send_stream_not_connected(self):
+        """No client returns failed SendResult for streams."""
+        self.adapter._client = None
+
+        result = self.adapter._do_send_message("42:general", "no client")
+
+        assert result.success is False
+        assert "Not connected" in result.error
+
+
+# ---------------------------------------------------------------------------
+# 1:1 DM send path
+# ---------------------------------------------------------------------------
+
+
+class TestZulipDmSendPath:
+    """Verify that _do_send_message correctly handles 1:1 DM chat IDs."""
+
+    def setup_method(self):
+        self.adapter = _make_adapter()
+        self.adapter._client = MagicMock()
+
+    def test_send_dm_to_email(self):
+        """DM chat IDs should send a private message to the recipient."""
+        self.adapter._client.send_message.return_value = {
+            "result": "success",
+            "id": 3000,
+        }
+
+        result = self.adapter._do_send_message("dm:alice@example.com", "Hello DM!")
+
+        assert result.success is True
+        call_args = self.adapter._client.send_message.call_args[0][0]
+        assert call_args["type"] == "private"
+        assert call_args["to"] == ["alice@example.com"]
+        assert call_args["content"] == "Hello DM!"
+
+    def test_send_dm_api_failure(self):
+        """API errors on DM send return failed SendResult."""
+        self.adapter._client.send_message.return_value = {
+            "result": "error",
+            "msg": "User not found",
+        }
+
+        result = self.adapter._do_send_message("dm:nobody@example.com", "fail")
+
+        assert result.success is False
+        assert "not found" in result.error
+
+    def test_send_dm_not_connected(self):
+        """No client returns failed SendResult for DMs."""
+        self.adapter._client = None
+
+        result = self.adapter._do_send_message("dm:alice@example.com", "no client")
+
+        assert result.success is False
+        assert "Not connected" in result.error
+
+
+# ---------------------------------------------------------------------------
+# Chat-ID comprehensive round-trips
+# ---------------------------------------------------------------------------
+
+
+class TestZulipChatIdRoundTrips:
+    """Comprehensive round-trip tests for all Zulip chat-ID formats."""
+
+    def test_stream_roundtrip_multiple_colons_in_topic(self):
+        """Topics with multiple colons must round-trip correctly."""
+        from gateway.platforms.zulip import _build_stream_chat_id, _parse_stream_chat_id
+
+        for topic in ["a:b:c", "time: 12:00 PM", "version:1.0:rc1", "key:value"]:
+            chat_id = _build_stream_chat_id(7, topic)
+            parsed = _parse_stream_chat_id(chat_id)
+            assert parsed == (7, topic), f"Failed for topic: {topic!r}"
+
+    def test_stream_roundtrip_special_characters(self):
+        """Topics with special characters must round-trip correctly."""
+        from gateway.platforms.zulip import _build_stream_chat_id, _parse_stream_chat_id
+
+        for topic in ["(no topic)", "help & support", "bug fix #123",
+                       "release/v2.0", "C++ discussion", "100% done"]:
+            chat_id = _build_stream_chat_id(42, topic)
+            parsed = _parse_stream_chat_id(chat_id)
+            assert parsed == (42, topic), f"Failed for topic: {topic!r}"
+
+    def test_dm_roundtrip_with_various_emails(self):
+        """DM chat IDs with various email formats must round-trip."""
+        from gateway.platforms.zulip import _build_dm_chat_id, _parse_dm_chat_id
+
+        for email in ["simple@example.com", "user+tag@example.co.uk",
+                       "user.name@sub.domain.org", "a@b.io"]:
+            chat_id = _build_dm_chat_id(email)
+            parsed = _parse_dm_chat_id(chat_id)
+            assert parsed == email, f"Failed for email: {email!r}"
+
+    def test_group_dm_roundtrip_ordering(self):
+        """Group DM chat IDs should always sort emails for determinism."""
+        from gateway.platforms.zulip import _build_group_dm_chat_id, _parse_group_dm_chat_id
+
+        # Different input orders must produce the same chat_id.
+        inputs = [
+            ["charlie@example.com", "alice@example.com", "bob@example.com"],
+            ["bob@example.com", "charlie@example.com", "alice@example.com"],
+            ["alice@example.com", "bob@example.com", "charlie@example.com"],
+        ]
+        chat_ids = [_build_group_dm_chat_id(emails) for emails in inputs]
+
+        # All should be identical (sorted).
+        assert len(set(chat_ids)) == 1
+        # Should parse back to the same sorted list.
+        parsed = _parse_group_dm_chat_id(chat_ids[0])
+        assert parsed == ["alice@example.com", "bob@example.com", "charlie@example.com"]
+
+    def test_is_dm_vs_is_group_dm_disjoint(self):
+        """DM and group DM classification should never overlap."""
+        from gateway.platforms.zulip import (
+            is_dm_chat_id,
+            is_group_dm_chat_id,
+            _parse_stream_chat_id,
+        )
+
+        dm_ids = ["dm:alice@example.com", "dm:bob@example.org"]
+        group_ids = [
+            "group_dm:alice@example.com,bob@example.com",
+            "group_dm:a@b.com,c@d.com,e@f.com",
+        ]
+        stream_ids = ["42:general", "5:time: 12:00"]
+
+        for cid in dm_ids:
+            assert is_dm_chat_id(cid) is True
+            assert is_group_dm_chat_id(cid) is False
+            assert _parse_stream_chat_id(cid) is None
+
+        for cid in group_ids:
+            assert is_group_dm_chat_id(cid) is True
+            assert is_dm_chat_id(cid) is False
+            assert _parse_stream_chat_id(cid) is None
+
+        for cid in stream_ids:
+            assert is_dm_chat_id(cid) is False
+            assert is_group_dm_chat_id(cid) is False
+            assert _parse_stream_chat_id(cid) is not None
+
+
+# ---------------------------------------------------------------------------
+# get_chat_info
+# ---------------------------------------------------------------------------
+
+
+class TestZulipGetChatInfo:
+    """Verify get_chat_info returns correct metadata for all chat types."""
+
+    @pytest.mark.asyncio
+    async def test_stream_from_cache(self):
+        """Stream chat info should use cached stream name."""
+        adapter = _make_adapter()
+        adapter._stream_name_cache = {42: "engineering"}
+
+        info = await adapter.get_chat_info("42:API Design")
+
+        assert info["type"] == "stream"
+        assert "engineering" in info["name"]
+        assert "API Design" in info["name"]
+
+    @pytest.mark.asyncio
+    async def test_stream_not_in_cache(self):
+        """Stream chat info without cache should fall back to chat_id."""
+        adapter = _make_adapter()
+
+        info = await adapter.get_chat_info("99:topic")
+
+        assert info["type"] == "stream"
+        assert info["name"] == "#99:topic > topic"
+
+    @pytest.mark.asyncio
+    async def test_dm_info(self):
+        """DM chat info should return the email as name."""
+        adapter = _make_adapter()
+
+        info = await adapter.get_chat_info("dm:alice@example.com")
+
+        assert info["type"] == "dm"
+        assert info["name"] == "alice@example.com"
+
+    @pytest.mark.asyncio
+    async def test_group_dm_fallback(self):
+        """Group DM chat info should fall back to the raw chat_id as name."""
+        adapter = _make_adapter()
+
+        info = await adapter.get_chat_info("group_dm:a@b.com,c@d.com")
+
+        assert info["type"] == "dm"  # group DMs fall to the else branch
+        assert info["name"] == "group_dm:a@b.com,c@d.com"
+
+
+# ---------------------------------------------------------------------------
+# edit_message
+# ---------------------------------------------------------------------------
+
+
+class TestZulipEditMessage:
+    """Verify edit_message behavior."""
+
+    @pytest.mark.asyncio
+    async def test_successful_edit(self):
+        """Successful edit should return success with the message ID."""
+        adapter = _make_adapter()
+        adapter._client = MagicMock()
+        adapter._client.update_message.return_value = {
+            "result": "success",
+        }
+
+        result = await adapter.edit_message("dm:alice@example.com", "1234", "updated text")
+
+        assert result.success is True
+        assert result.message_id == "1234"
+        adapter._client.update_message.assert_called_once_with({
+            "message_id": 1234,
+            "content": "updated text",
+        })
+
+    @pytest.mark.asyncio
+    async def test_edit_failure(self):
+        """Failed edit should return error."""
+        adapter = _make_adapter()
+        adapter._client = MagicMock()
+        adapter._client.update_message.return_value = {
+            "result": "error",
+            "msg": "Message not found",
+        }
+
+        result = await adapter.edit_message("dm:alice@example.com", "9999", "edit")
+
+        assert result.success is False
+        assert "not found" in result.error
+
+    @pytest.mark.asyncio
+    async def test_edit_not_connected(self):
+        """Edit without client should return not-supported."""
+        adapter = _make_adapter()
+        adapter._client = None
+
+        result = await adapter.edit_message("dm:alice@example.com", "1234", "edit")
+
+        assert result.success is False
+        assert "Not supported" in result.error
+
+
+# ---------------------------------------------------------------------------
+# send() high-level method
+# ---------------------------------------------------------------------------
+
+
+class TestZulipSendHighLevel:
+    """Verify the high-level send() method (chunking, empty, etc.)."""
+
+    @pytest.mark.asyncio
+    async def test_send_empty_content_returns_success(self):
+        """Empty content should return success without API call."""
+        adapter = _make_adapter()
+        adapter._client = MagicMock()
+
+        result = await adapter.send("42:general", "")
+
+        assert result.success is True
+        adapter._client.send_message.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_send_none_content_returns_success(self):
+        """None content should return success without API call."""
+        adapter = _make_adapter()
+        adapter._client = MagicMock()
+
+        result = await adapter.send("dm:alice@example.com", None)
+
+        assert result.success is True
+        adapter._client.send_message.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_send_single_chunk(self):
+        """Short messages should be sent in a single chunk."""
+        adapter = _make_adapter()
+        adapter._client = MagicMock()
+        adapter._client.send_message.return_value = {
+            "result": "success",
+            "id": 5000,
+        }
+
+        result = await adapter.send("42:general", "Hello!")
+
+        assert result.success is True
+        assert result.message_id == "5000"
+        assert adapter._client.send_message.call_count == 1
+
+    @pytest.mark.asyncio
+    async def test_send_multiple_chunks(self):
+        """Messages exceeding MAX_MESSAGE_LENGTH should be split."""
+        adapter = _make_adapter()
+        adapter._client = MagicMock()
+        adapter._client.send_message.return_value = {
+            "result": "success",
+            "id": 6000,
+        }
+
+        from gateway.platforms.zulip import MAX_MESSAGE_LENGTH
+        long_content = "x" * (MAX_MESSAGE_LENGTH + 100)
+
+        result = await adapter.send("42:general", long_content)
+
+        assert result.success is True
+        assert adapter._client.send_message.call_count == 2
+
+    @pytest.mark.asyncio
+    async def test_send_failure_on_first_chunk_stops(self):
+        """If the first chunk fails, send should return the error."""
+        adapter = _make_adapter()
+        adapter._client = MagicMock()
+        adapter._client.send_message.return_value = {
+            "result": "error",
+            "msg": "permission denied",
+        }
+
+        from gateway.platforms.zulip import MAX_MESSAGE_LENGTH
+        long_content = "x" * (MAX_MESSAGE_LENGTH + 100)
+
+        result = await adapter.send("42:general", long_content)
+
+        assert result.success is False
+        # Should only have attempted the first chunk.
+        assert adapter._client.send_message.call_count == 1
+
+
+# ---------------------------------------------------------------------------
+# Mention gating integration regression
+# ---------------------------------------------------------------------------
+
+
+class TestZulipMentionGatingIntegration:
+    """End-to-end integration tests for mention/trigger gating in _dispatch_inbound.
+
+    These tests verify the complete decision chain: DMs always pass,
+    streams require mention (unless configured otherwise), wildcards trigger.
+    """
+
+    def setup_method(self):
+        self.adapter = _make_adapter(bot_email="bot@example.zulipchat.com")
+        self.adapter._bot_user_id = 42
+        self.adapter._bot_full_name = "Hermes Bot"
+        self.adapter.handle_message = AsyncMock()
+        self.adapter._stream_name_cache = {10: "general", 20: "random"}
+
+    def _make_stream_msg(self, stream_id, content, subject="test", sender="alice@example.com"):
+        return {
+            "id": 9000 + stream_id,
+            "sender_email": sender,
+            "sender_full_name": "Alice",
+            "sender_id": 10,
+            "type": "stream",
+            "stream_id": stream_id,
+            "subject": subject,
+            "content": content,
+        }
+
+    def _make_dm_msg(self, content, sender="alice@example.com"):
+        return {
+            "id": 9100,
+            "sender_email": sender,
+            "sender_full_name": "Alice",
+            "sender_id": 10,
+            "type": "private",
+            "content": content,
+            "display_recipient": [
+                {"email": "bot@example.zulipchat.com"},
+                {"email": sender},
+            ],
+        }
+
+    @pytest.mark.asyncio
+    async def test_dm_always_passes_no_mention_needed(self):
+        """DMs should be dispatched regardless of mention config."""
+        self.adapter._dispatch_inbound(self._make_dm_msg("just saying hi"), {})
+
+        assert self.adapter.handle_message.called
+        msg_event = self.adapter.handle_message.call_args[0][0]
+        assert msg_event.text == "just saying hi"
+
+    @pytest.mark.asyncio
+    async def test_dm_does_not_strip_content(self):
+        """DMs should not have mention stripping applied."""
+        self.adapter._dispatch_inbound(
+            self._make_dm_msg("@**Hermes Bot** do something"), {}
+        )
+
+        msg_event = self.adapter.handle_message.call_args[0][0]
+        assert "@**Hermes Bot**" in msg_event.text
+
+    @pytest.mark.asyncio
+    async def test_stream_without_mention_blocked_by_default(self):
+        """Stream message without @mention should be ignored (default config)."""
+        self.adapter._dispatch_inbound(
+            self._make_stream_msg(10, "hello everyone"), {}
+        )
+
+        self.adapter.handle_message.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_stream_with_bot_mention_passes(self):
+        """Stream message with @**Hermes Bot** should be dispatched."""
+        self.adapter._dispatch_inbound(
+            self._make_stream_msg(10, "@**Hermes Bot** hello"), {}
+        )
+
+        assert self.adapter.handle_message.called
+        msg_event = self.adapter.handle_message.call_args[0][0]
+        assert msg_event.text == "hello"
+
+    @pytest.mark.asyncio
+    async def test_stream_with_email_mention_passes(self):
+        """Stream message with @bot@example.zulipchat.com should be dispatched."""
+        self.adapter._dispatch_inbound(
+            self._make_stream_msg(10, "@bot@example.zulipchat.com help"), {}
+        )
+
+        assert self.adapter.handle_message.called
+        msg_event = self.adapter.handle_message.call_args[0][0]
+        assert msg_event.text == "help"
+
+    @pytest.mark.asyncio
+    async def test_stream_wildcard_all_passes(self):
+        """@**all** should trigger the bot but content stays intact."""
+        self.adapter._dispatch_inbound(
+            self._make_stream_msg(10, "@**all** attention"), {}
+        )
+
+        assert self.adapter.handle_message.called
+        msg_event = self.adapter.handle_message.call_args[0][0]
+        assert "@**all**" in msg_event.text
+
+    @pytest.mark.asyncio
+    async def test_stream_wildcard_everyone_passes(self):
+        """@**everyone** should trigger the bot."""
+        self.adapter._dispatch_inbound(
+            self._make_stream_msg(20, "@**everyone** announcement"), {}
+        )
+
+        assert self.adapter.handle_message.called
+
+    @pytest.mark.asyncio
+    async def test_stream_free_response_passes_without_mention(self, monkeypatch):
+        """Free-response stream should not require @mention."""
+        monkeypatch.setenv("ZULIP_FREE_RESPONSE_STREAMS", "general")
+
+        adapter = _make_adapter(bot_email="bot@example.zulipchat.com")
+        adapter._bot_user_id = 42
+        adapter._bot_full_name = "Hermes Bot"
+        adapter.handle_message = AsyncMock()
+        adapter._stream_name_cache = {10: "general"}
+
+        adapter._dispatch_inbound(
+            self._make_stream_msg(10, "hello without mention"), {}
+        )
+
+        assert adapter.handle_message.called
+
+    @pytest.mark.asyncio
+    async def test_stream_require_mention_disabled(self, monkeypatch):
+        """When ZULIP_REQUIRE_MENTION=false, all streams pass without mention."""
+        monkeypatch.setenv("ZULIP_REQUIRE_MENTION", "false")
+
+        adapter = _make_adapter(bot_email="bot@example.zulipchat.com")
+        adapter._bot_user_id = 42
+        adapter._bot_full_name = "Hermes Bot"
+        adapter.handle_message = AsyncMock()
+        adapter._stream_name_cache = {20: "random"}
+
+        adapter._dispatch_inbound(
+            self._make_stream_msg(20, "hello without mention"), {}
+        )
+
+        assert adapter.handle_message.called
+
+    @pytest.mark.asyncio
+    async def test_stream_mixed_content_strips_bot_only(self):
+        """Bot mention should be stripped; wildcard mentions preserved."""
+        self.adapter._dispatch_inbound(
+            self._make_stream_msg(10, "@**Hermes Bot** @**all** check this"), {}
+        )
+
+        assert self.adapter.handle_message.called
+        msg_event = self.adapter.handle_message.call_args[0][0]
+        assert "@**Hermes Bot**" not in msg_event.text
+        assert "@**all**" in msg_event.text
+
+
+# ---------------------------------------------------------------------------
+# Session-history directory integration regression
+# ---------------------------------------------------------------------------
+
+
+class TestZulipSessionDirectoryIntegration:
+    """Regression tests: verify Zulip sessions flow correctly through the
+    channel directory pipeline from sessions.json to display."""
+
+    def test_build_from_sessions_deduplicates_same_stream_topic(self, tmp_path):
+        """Multiple sessions for the same stream+topic should deduplicate."""
+        sessions_path = tmp_path / "sessions" / "sessions.json"
+        sessions_path.parent.mkdir(parents=True)
+        sessions_path.write_text(json.dumps({
+            "s1": {
+                "origin": {
+                    "platform": "zulip",
+                    "chat_id": "42:general",
+                    "chat_name": "general",
+                    "chat_topic": "general",
+                },
+                "chat_type": "stream",
+            },
+            "s2": {
+                "origin": {
+                    "platform": "zulip",
+                    "chat_id": "42:general",
+                    "chat_name": "general",
+                    "chat_topic": "general",
+                },
+                "chat_type": "stream",
+            },
+        }))
+
+        with patch.dict(os.environ, {"HERMES_HOME": str(tmp_path)}):
+            entries = _build_from_sessions("zulip")
+
+        assert len(entries) == 1
+
+    def test_build_from_sessions_distinguishes_different_topics(self, tmp_path):
+        """Different topics in the same stream produce separate entries by chat_id."""
+        sessions_path = tmp_path / "sessions" / "sessions.json"
+        sessions_path.parent.mkdir(parents=True)
+        sessions_path.write_text(json.dumps({
+            "topic_a": {
+                "origin": {
+                    "platform": "zulip",
+                    "chat_id": "42:API Design",
+                    "chat_name": "engineering",
+                    "chat_topic": "API Design",
+                },
+                "chat_type": "stream",
+            },
+            "topic_b": {
+                "origin": {
+                    "platform": "zulip",
+                    "chat_id": "42:Bugs",
+                    "chat_name": "engineering",
+                    "chat_topic": "Bugs",
+                },
+                "chat_type": "stream",
+            },
+        }))
+
+        with patch.dict(os.environ, {"HERMES_HOME": str(tmp_path)}):
+            entries = _build_from_sessions("zulip")
+
+        # Different chat_ids (42:API Design vs 42:Bugs) produce distinct entries.
+        assert len(entries) == 2
+        ids = {e["id"] for e in entries}
+        assert "42:API Design" in ids
+        assert "42:Bugs" in ids
+
+    def test_directory_display_includes_zulip_section(self, tmp_path):
+        """format_directory_for_display should include a Zulip section."""
+        from gateway.channel_directory import format_directory_for_display
+
+        cache_file = _write_directory(tmp_path, {
+            "zulip": [
+                {"id": "dm:alice@example.com", "name": "alice@example.com", "type": "dm"},
+            ],
+            "telegram": [
+                {"id": "123", "name": "Bob", "type": "dm"},
+            ],
+        })
+
+        # Import here after patching
+        from gateway import channel_directory
+        original_path = channel_directory.DIRECTORY_PATH
+
+        try:
+            channel_directory.DIRECTORY_PATH = cache_file
+            result = format_directory_for_display()
+        finally:
+            channel_directory.DIRECTORY_PATH = original_path
+
+        assert "Zulip:" in result
+        assert "zulip:alice@example.com" in result
+        assert "Telegram:" in result
+        assert "telegram:Bob" in result
+
+
+# ---------------------------------------------------------------------------
+# Event validation edge cases
+# ---------------------------------------------------------------------------
+
+
+class TestZulipEventValidationEdgeCases:
+    """Regression tests for event validation edge cases in _on_zulip_event."""
+
+    def setup_method(self):
+        self.adapter = _make_adapter(bot_email="bot@example.zulipchat.com")
+        self.adapter._bot_user_id = 42
+        self.adapter._bot_full_name = "Hermes Bot"
+        self.adapter._loop = None  # prevent async dispatch
+        self.adapter.handle_message = AsyncMock()
+
+    def test_event_with_missing_message_key(self):
+        """Events missing the 'message' key should be silently ignored."""
+        event = {"type": "message", "op": "add"}
+        self.adapter._on_zulip_event(event)
+        self.adapter.handle_message.assert_not_called()
+
+    def test_event_with_null_message(self):
+        """Events with null message should be silently ignored."""
+        event = {"type": "message", "op": "add", "message": None}
+        self.adapter._on_zulip_event(event)
+        self.adapter.handle_message.assert_not_called()
+
+    def test_event_with_non_dict_message(self):
+        """Events with non-dict message should be silently ignored."""
+        event = {"type": "message", "op": "add", "message": "not a dict"}
+        self.adapter._on_zulip_event(event)
+        self.adapter.handle_message.assert_not_called()
+
+    def test_event_with_op_update_ignored(self):
+        """Events with op='update' (edits) should be ignored."""
+        event = {
+            "type": "message",
+            "op": "update",
+            "message": {
+                "id": 8000,
+                "sender_email": "alice@example.com",
+                "sender_id": 10,
+                "type": "stream",
+                "content": "edited message",
+            },
+        }
+        self.adapter._on_zulip_event(event)
+        self.adapter.handle_message.assert_not_called()
+
+    def test_event_with_op_delete_ignored(self):
+        """Events with op='delete' should be ignored."""
+        event = {
+            "type": "message",
+            "op": "delete",
+            "message": {
+                "id": 8001,
+                "sender_email": "alice@example.com",
+                "sender_id": 10,
+                "type": "stream",
+                "content": "",
+            },
+        }
+        self.adapter._on_zulip_event(event)
+        self.adapter.handle_message.assert_not_called()
+
+    def test_event_type_reaction_ignored(self):
+        """Non-message event types (e.g. 'reaction') should be ignored."""
+        event = {
+            "type": "reaction",
+            "op": "add",
+            "message": {
+                "id": 8002,
+                "sender_email": "alice@example.com",
+                "sender_id": 10,
+                "type": "stream",
+                "content": "",
+            },
+        }
+        self.adapter._on_zulip_event(event)
+        self.adapter.handle_message.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_whitespace_only_content_filtered(self):
+        """Messages with only whitespace content should be filtered out."""
+        self.adapter._loop = asyncio.get_running_loop()
+
+        event = {
+            "type": "message",
+            "op": "add",
+            "message": {
+                "id": 8003,
+                "sender_email": "alice@example.com",
+                "sender_id": 10,
+                "type": "private",
+                "content": "   \t\n  ",
+                "display_recipient": [
+                    {"email": "bot@example.zulipchat.com"},
+                    {"email": "alice@example.com"},
+                ],
+            },
+        }
+        self.adapter._on_zulip_event(event)
+        # Give the event loop a chance to process
+        await asyncio.sleep(0.05)
+        self.adapter.handle_message.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_unknown_msg_type_filtered(self):
+        """Messages with an unknown type (not stream/private) should be ignored."""
+        self.adapter._loop = asyncio.get_running_loop()
+
+        event = {
+            "type": "message",
+            "op": "add",
+            "message": {
+                "id": 8004,
+                "sender_email": "alice@example.com",
+                "sender_id": 10,
+                "type": "outgoing_webhook",
+                "content": "should be ignored",
+            },
+        }
+        self.adapter._on_zulip_event(event)
+        await asyncio.sleep(0.05)
+        self.adapter.handle_message.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# Integration verification — Zulip wired into all subsystems
+# ---------------------------------------------------------------------------
+
+
+class TestZulipSubsystemIntegration:
+    """Structural tests verifying Zulip is present in all gateway subsystems.
+
+    Follows the pattern from test_email.py::TestAuthorizationMaps and related
+    classes — uses inspect.getsource() to guard against accidental removal.
+    """
+
+    def test_zulip_in_adapter_factory(self):
+        """Platform.ZULIP branch should exist in _create_adapter()."""
+        import gateway.run
+        import inspect
+        source = inspect.getsource(gateway.run.GatewayRunner._create_adapter)
+        assert "Platform.ZULIP" in source
+
+    def test_zulip_in_allowed_users_map(self):
+        """ZULIP_ALLOWED_USERS should be in platform_env_map."""
+        import gateway.run
+        import inspect
+        source = inspect.getsource(gateway.run.GatewayRunner._is_user_authorized)
+        assert "ZULIP_ALLOWED_USERS" in source
+
+    def test_zulip_in_allow_all_map(self):
+        """ZULIP_ALLOW_ALL_USERS should be in platform_allow_all_map."""
+        import gateway.run
+        import inspect
+        source = inspect.getsource(gateway.run.GatewayRunner._is_user_authorized)
+        assert "ZULIP_ALLOW_ALL_USERS" in source
+
+    def test_zulip_in_platform_hints(self):
+        """'zulip' key should exist in PLATFORM_HINTS."""
+        import agent.prompt_builder as pb
+        assert "zulip" in pb.PLATFORM_HINTS
+
+    def test_zulip_in_session_discovery(self):
+        """'zulip' should be in the session-based discovery tuple."""
+        import gateway.channel_directory as cd
+        import inspect
+        source = inspect.getsource(cd.build_channel_directory)
+        assert '"zulip"' in source or "'zulip'" in source
+
+    def test_zulip_in_gateway_platforms(self):
+        """'zulip' should be a key in the setup wizard platform list."""
+        from hermes_cli.gateway import _PLATFORMS
+        keys = [p["key"] for p in _PLATFORMS]
+        assert "zulip" in keys
+
+    def test_zulip_has_setup_vars(self):
+        """Zulip platform entry in _PLATFORMS should have required vars."""
+        from hermes_cli.gateway import _PLATFORMS
+        zulip = next((p for p in _PLATFORMS if p["key"] == "zulip"), None)
+        assert zulip is not None, "Zulip not in _PLATFORMS"
+        var_names = [v["name"] for v in zulip.get("vars", [])]
+        assert "ZULIP_API_KEY" in var_names
+        assert "ZULIP_BOT_EMAIL" in var_names
+        assert "ZULIP_SITE_URL" in var_names
