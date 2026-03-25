@@ -466,13 +466,23 @@ class ZulipAdapter(BasePlatformAdapter):
                 "topic": topic,
                 "content": content,
             }
-        elif _parse_dm_chat_id(chat_id):
+        elif is_dm_chat_id(chat_id):
             email = _parse_dm_chat_id(chat_id)
             request = {
                 "type": "private",
                 "to": [email],
                 "content": content,
             }
+        elif is_group_dm_chat_id(chat_id):
+            emails = _parse_group_dm_chat_id(chat_id)
+            if emails:
+                request = {
+                    "type": "private",
+                    "to": emails,
+                    "content": content,
+                }
+            else:
+                return SendResult(success=False, error="Invalid group DM chat ID")
         else:
             # Fallback: treat as DM to the email itself.
             request = {

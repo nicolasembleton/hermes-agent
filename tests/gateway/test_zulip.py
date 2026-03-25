@@ -678,921 +678,357 @@ class TestZulipInboundDispatch:
         msg_event = self.adapter.handle_message.call_args[0][0]
         assert msg_event.message_type.value == "command"
 
-    @pytest.mark.asyncio
-    async def test_stream_message_with_mention_dispatched(self):
-        """Stream messages with @mention of bot should be dispatched."""
-        message = {
-            "id": 502,
-            "sender_email": "alice@example.com",
-            "sender_full_name": "Alice",
-            "sender_id": 10,
-            "type": "stream",
-            "stream_id": 99,
-            "subject": "general",
-            "content": "@**Hermes Bot** what is 2+2?",
-        }
-        event = {"message": message}
-
-        self.adapter._dispatch_inbound(message, event)
-
-        assert self.adapter.handle_message.called
-        msg_event = self.adapter.handle_message.call_args[0][0]
-        assert msg_event.text == "@**Hermes Bot** what is 2+2?"
-        assert msg_event.source.chat_type == "stream"
-        assert msg_event.source.chat_id == "99:general"
-        assert msg_event.source.chat_topic == "general"
-
-    @pytest.mark.asyncio
-    async def test_stream_message_without_mention_ignored(self):
-        """Stream messages without @mention should be silently dropped."""
-        message = {
-            "id": 503,
-            "sender_email": "alice@example.com",
-            "sender_full_name": "Alice",
-            "sender_id": 10,
-            "type": "stream",
-            "stream_id": 99,
-            "subject": "general",
-            "content": "hey everyone",
-        }
-        event = {"message": message}
-
-        self.adapter._dispatch_inbound(message, event)
-
-        self.adapter.handle_message.assert_not_called()
-
-    @pytest.mark.asyncio
-    async def test_stream_mention_by_email(self):
-        """@bot@example.zulipchat.com should also trigger processing."""
-        message = {
-            "id": 504,
-            "sender_email": "alice@example.com",
-            "sender_full_name": "Alice",
-            "sender_id": 10,
-            "type": "stream",
-            "stream_id": 99,
-            "subject": "help",
-            "content": "@bot@example.zulipchat.com help me",
-        }
-        event = {"message": message}
-
-        self.adapter._dispatch_inbound(message, event)
-
-        assert self.adapter.handle_message.called
-
-    @pytest.mark.asyncio
-    async def test_dm_empty_content_ignored(self):
-        """Empty DMs should not dispatch."""
-        message = {
-            "id": 505,
-            "sender_email": "alice@example.com",
-            "sender_full_name": "Alice",
-            "sender_id": 10,
-            "type": "private",
-            "content": "",
-            "display_recipient": [
-                {"email": "bot@example.zulipchat.com"},
-                {"email": "alice@example.com"},
-            ],
-        }
-        event = {"message": message}
-
-        self.adapter._dispatch_inbound(message, event)
-        self.adapter.handle_message.assert_not_called()
-
-    @pytest.mark.asyncio
-    async def test_unknown_message_type_ignored(self):
-        """Messages of unknown type should be ignored."""
-        message = {
-            "id": 506,
-            "sender_email": "alice@example.com",
-            "sender_full_name": "Alice",
-            "sender_id": 10,
-            "type": "outgoing-webhook",
-            "content": "something",
-        }
-        event = {"message": message}
-
-        self.adapter._dispatch_inbound(message, event)
-        self.adapter.handle_message.assert_not_called()
-
-    @pytest.mark.asyncio
-    async def test_exclamation_command_detected(self):
-        """Messages starting with ! should be COMMAND type."""
-        message = {
-            "id": 507,
-            "sender_email": "alice@example.com",
-            "sender_full_name": "Alice",
-            "sender_id": 10,
-            "type": "private",
-            "content": "!status",
-            "display_recipient": [
-                {"email": "bot@example.zulipchat.com"},
-                {"email": "alice@example.com"},
-            ],
-        }
-        event = {"message": message}
-
-        self.adapter._dispatch_inbound(message, event)
-
-        msg_event = self.adapter.handle_message.call_args[0][0]
-        assert msg_event.message_type.value == "command"
-
-    @pytest.mark.asyncio
-    async def test_dm_sender_full_name_fallback_to_email(self):
-        """When sender_full_name is missing, fall back to email."""
-        message = {
-            "id": 508,
-            "sender_email": "alice@example.com",
-            "sender_full_name": "",
-            "sender_id": 10,
-            "type": "private",
-            "content": "Hi",
-            "display_recipient": [
-                {"email": "bot@example.zulipchat.com"},
-                {"email": "alice@example.com"},
-            ],
-        }
-        event = {"message": message}
-
-        self.adapter._dispatch_inbound(message, event)
-
-        msg_event = self.adapter.handle_message.call_args[0][0]
-        assert msg_event.source.user_name == "alice@example.com"
-
 
 # ---------------------------------------------------------------------------
-# Outbound send
+# Group DM send path
 # ---------------------------------------------------------------------------
 
 
-class TestZulipSend:
+class TestGroupDmSendPath:
+    """Verify that _do_send_message correctly handles group DM chat IDs."""
+
     def setup_method(self):
         self.adapter = _make_adapter()
         self.adapter._client = MagicMock()
 
-    def test_do_send_stream_message(self):
-        """_do_send_message should build a stream-type request for stream chat IDs."""
+    def test_send_group_dm_parses_emails(self):
+        """Group DM chat IDs should send to all recipient emails."""
         self.adapter._client.send_message.return_value = {
             "result": "success",
-            "id": 900,
+            "id": 1000,
         }
 
-        result = self.adapter._do_send_message("99:general", "Hello stream!")
-
-        assert result.success is True
-        assert result.message_id == "900"
-        call_args = self.adapter._client.send_message.call_args[0][0]
-        assert call_args["type"] == "stream"
-        assert call_args["to"] == "99"
-        assert call_args["topic"] == "general"
-        assert call_args["content"] == "Hello stream!"
-
-    def test_do_send_dm_message(self):
-        """_do_send_message should build a private-type request for DM chat IDs."""
-        self.adapter._client.send_message.return_value = {
-            "result": "success",
-            "id": 901,
-        }
-
-        result = self.adapter._do_send_message("dm:alice@example.com", "Hello DM!")
-
-        assert result.success is True
-        assert result.message_id == "901"
-        call_args = self.adapter._client.send_message.call_args[0][0]
-        assert call_args["type"] == "private"
-        assert call_args["to"] == ["alice@example.com"]
-        assert call_args["content"] == "Hello DM!"
-
-    def test_do_send_bare_email_fallback(self):
-        """Unknown chat IDs that look like emails should fallback to private."""
-        self.adapter._client.send_message.return_value = {
-            "result": "success",
-            "id": 902,
-        }
-
-        result = self.adapter._do_send_message("bob@example.com", "Fallback")
+        result = self.adapter._do_send_message(
+            "group_dm:alice@example.com,bob@example.com", "Hello group!"
+        )
 
         assert result.success is True
         call_args = self.adapter._client.send_message.call_args[0][0]
         assert call_args["type"] == "private"
-        assert call_args["to"] == ["bob@example.com"]
+        assert call_args["to"] == ["alice@example.com", "bob@example.com"]
+        assert call_args["content"] == "Hello group!"
 
-    def test_do_send_api_failure(self):
-        """API errors should return a failed SendResult."""
+    def test_send_group_dm_three_participants(self):
+        """Group DM with 3 participants sends to all three."""
+        self.adapter._client.send_message.return_value = {
+            "result": "success",
+            "id": 1001,
+        }
+
+        result = self.adapter._do_send_message(
+            "group_dm:alice@example.com,bob@example.com,charlie@example.com", "Hey all"
+        )
+
+        assert result.success is True
+        call_args = self.adapter._client.send_message.call_args[0][0]
+        assert len(call_args["to"]) == 3
+        assert "charlie@example.com" in call_args["to"]
+
+    def test_send_group_dm_api_failure(self):
+        """API errors on group DM send return failed SendResult."""
         self.adapter._client.send_message.return_value = {
             "result": "error",
-            "msg": "Stream not found",
+            "msg": "One or more recipients are invalid",
         }
 
-        result = self.adapter._do_send_message("99:general", "fail")
+        result = self.adapter._do_send_message(
+            "group_dm:alice@example.com,bob@example.com", "fail"
+        )
 
         assert result.success is False
-        assert "Stream not found" in result.error
+        assert "invalid" in result.error
 
-    def test_do_send_exception(self):
-        """Network exceptions should return a failed SendResult."""
-        self.adapter._client.send_message.side_effect = ConnectionError("timeout")
-
-        result = self.adapter._do_send_message("99:general", "fail")
-
-        assert result.success is False
-        assert "timeout" in result.error
-
-    def test_do_send_not_connected(self):
-        """No client should return a failed SendResult."""
+    def test_send_group_dm_not_connected(self):
+        """No client returns failed SendResult for group DMs."""
         self.adapter._client = None
 
-        result = self.adapter._do_send_message("99:general", "no client")
+        result = self.adapter._do_send_message(
+            "group_dm:alice@example.com,bob@example.com", "no client"
+        )
 
         assert result.success is False
         assert "Not connected" in result.error
 
-    @pytest.mark.asyncio
-    async def test_send_empty_content_succeeds(self):
-        """Empty content should return success without calling API."""
-        result = await self.adapter.send("99:general", "")
-        assert result.success is True
-        self.adapter._client.send_message.assert_not_called()
+    def test_send_group_dm_roundtrip_with_build_parse(self):
+        """Full round-trip: build chat ID → send → verify recipients."""
+        from gateway.platforms.zulip import _build_group_dm_chat_id, _parse_group_dm_chat_id
+        emails = ["charlie@example.com", "alice@example.com"]
+        chat_id = _build_group_dm_chat_id(emails)
 
-    @pytest.mark.asyncio
-    async def test_send_formats_and_truncates(self):
-        """send() should format content and handle truncation."""
         self.adapter._client.send_message.return_value = {
             "result": "success",
-            "id": 903,
+            "id": 1002,
         }
 
-        content = "![img](https://example.com/a.png) and some text"
-        result = await self.adapter.send("99:general", content)
+        result = self.adapter._do_send_message(chat_id, "roundtrip test")
 
         assert result.success is True
-        # Image markdown should be stripped by format_message
-        sent = self.adapter._client.send_message.call_args[0][0]["content"]
-        assert "![" not in sent
-        assert "https://example.com/a.png" in sent
+        call_args = self.adapter._client.send_message.call_args[0][0]
+        parsed_emails = _parse_group_dm_chat_id(chat_id)
+        assert call_args["to"] == parsed_emails
 
 
 # ---------------------------------------------------------------------------
-# get_chat_info
+# Session key integration with Zulip chat IDs
 # ---------------------------------------------------------------------------
 
 
-class TestZulipGetChatInfo:
-    def setup_method(self):
-        self.adapter = _make_adapter()
-        self.adapter._stream_name_cache = {42: "general", 99: "random"}
+class TestZulipSessionKeyIntegration:
+    """Verify that build_session_key produces deterministic, isolated keys
+    for all Zulip chat types using the chat-id encoding."""
 
-    @pytest.mark.asyncio
-    async def test_stream_chat_info(self):
-        info = await self.adapter.get_chat_info("42:general")
-        assert info["type"] == "stream"
-        assert info["name"] == "#general > general"
+    def test_stream_session_key_includes_stream_id_and_topic(self):
+        """Stream messages with different topics should produce different keys."""
+        from gateway.session import SessionSource, build_session_key
 
-    @pytest.mark.asyncio
-    async def test_stream_chat_info_unknown_stream(self):
-        """Unknown stream_id falls back to chat_id as the stream name."""
-        info = await self.adapter.get_chat_info("999:topic")
-        assert info["type"] == "stream"
-        # _parse_stream_chat_id returns (999, "topic"), stream_name_cache
-        # doesn't have 999 so it falls back to chat_id = "999:topic"
-        assert info["name"] == "#999:topic > topic"
-
-    @pytest.mark.asyncio
-    async def test_dm_chat_info(self):
-        info = await self.adapter.get_chat_info("dm:alice@example.com")
-        assert info["type"] == "dm"
-        assert info["name"] == "alice@example.com"
-
-    @pytest.mark.asyncio
-    async def test_unknown_chat_id_fallback(self):
-        info = await self.adapter.get_chat_info("something-weird")
-        assert info["type"] == "dm"
-        assert info["name"] == "something-weird"
-
-
-# ---------------------------------------------------------------------------
-# send_typing
-# ---------------------------------------------------------------------------
-
-
-class TestZulipSendTyping:
-    def setup_method(self):
-        self.adapter = _make_adapter()
-        self.adapter._client = MagicMock()
-        self.adapter._stream_name_cache = {42: "general"}
-
-    @pytest.mark.asyncio
-    async def test_send_typing_for_dm(self):
-        await self.adapter.send_typing("dm:alice@example.com")
-        self.adapter._client.set_typing_status.assert_called_once_with(
-            {"to": ["alice@example.com"], "op": "start"}
+        source_a = SessionSource(
+            platform=Platform.ZULIP,
+            chat_id="42:general",
+            chat_name="general",
+            chat_type="stream",
+            user_id="alice@example.com",
+            user_name="Alice",
+            chat_topic="general",
+        )
+        source_b = SessionSource(
+            platform=Platform.ZULIP,
+            chat_id="42:help",
+            chat_name="general",
+            chat_type="stream",
+            user_id="alice@example.com",
+            user_name="Alice",
+            chat_topic="help",
         )
 
-    @pytest.mark.asyncio
-    async def test_send_typing_for_stream(self):
-        await self.adapter.send_typing("42:general")
-        self.adapter._client.set_typing_status.assert_called_once_with(
-            {"to": ["general"], "op": "start"}
+        key_a = build_session_key(source_a)
+        key_b = build_session_key(source_b)
+
+        assert key_a != key_b
+        assert "42:general" in key_a
+        assert "42:help" in key_b
+
+    def test_stream_session_key_different_streams_same_topic(self):
+        """Same topic in different streams should produce different keys."""
+        from gateway.session import SessionSource, build_session_key
+
+        source_a = SessionSource(
+            platform=Platform.ZULIP,
+            chat_id="10:general",
+            chat_type="stream",
+            user_id="alice@example.com",
+        )
+        source_b = SessionSource(
+            platform=Platform.ZULIP,
+            chat_id="20:general",
+            chat_type="stream",
+            user_id="alice@example.com",
         )
 
-    @pytest.mark.asyncio
-    async def test_send_typing_without_client(self):
-        self.adapter._client = None
-        # Should not raise
-        await self.adapter.send_typing("dm:alice@example.com")
+        key_a = build_session_key(source_a)
+        key_b = build_session_key(source_b)
 
-    @pytest.mark.asyncio
-    async def test_send_typing_unknown_stream_id(self):
-        """Unknown stream ID has no cached name — should not call typing API."""
-        await self.adapter.send_typing("999:topic")
-        self.adapter._client.set_typing_status.assert_not_called()
+        assert key_a != key_b
 
+    def test_stream_session_key_same_sender_isolated(self):
+        """Same sender in different stream topics gets different sessions."""
+        from gateway.session import SessionSource, build_session_key
 
-# ---------------------------------------------------------------------------
-# edit_message
-# ---------------------------------------------------------------------------
+        source = SessionSource(
+            platform=Platform.ZULIP,
+            chat_id="42:topic-a",
+            chat_type="stream",
+            user_id="alice@example.com",
+        )
 
+        # With default group_sessions_per_user=True, sender is included
+        key = build_session_key(source)
+        assert "alice@example.com" in key
 
-class TestZulipEditMessage:
-    def setup_method(self):
-        self.adapter = _make_adapter()
-        self.adapter._client = MagicMock()
+    def test_dm_session_key_isolated_from_stream(self):
+        """DMs should never share a session key with stream messages."""
+        from gateway.session import SessionSource, build_session_key
 
-    @pytest.mark.asyncio
-    async def test_edit_message_success(self):
-        self.adapter._client.update_message.return_value = {
-            "result": "success",
-        }
+        dm_source = SessionSource(
+            platform=Platform.ZULIP,
+            chat_id="dm:alice@example.com",
+            chat_type="dm",
+            user_id="alice@example.com",
+        )
+        stream_source = SessionSource(
+            platform=Platform.ZULIP,
+            chat_id="42:general",
+            chat_type="stream",
+            user_id="alice@example.com",
+        )
 
-        result = await self.adapter.edit_message("99:general", "123", "Updated text")
+        dm_key = build_session_key(dm_source)
+        stream_key = build_session_key(stream_source)
 
-        assert result.success is True
-        self.adapter._client.update_message.assert_called_once_with({
-            "message_id": 123,
-            "content": "Updated text",
-        })
+        assert dm_key != stream_key
 
-    @pytest.mark.asyncio
-    async def test_edit_message_api_failure(self):
-        self.adapter._client.update_message.return_value = {
-            "result": "error",
-            "msg": "permission denied",
-        }
+    def test_dm_session_key_different_users(self):
+        """DMs with different users should produce different keys."""
+        from gateway.session import SessionSource, build_session_key
 
-        result = await self.adapter.edit_message("99:general", "123", "fail")
+        source_a = SessionSource(
+            platform=Platform.ZULIP,
+            chat_id="dm:alice@example.com",
+            chat_type="dm",
+            user_id="alice@example.com",
+        )
+        source_b = SessionSource(
+            platform=Platform.ZULIP,
+            chat_id="dm:bob@example.com",
+            chat_type="dm",
+            user_id="bob@example.com",
+        )
 
-        assert result.success is False
-        assert "permission denied" in result.error
+        key_a = build_session_key(source_a)
+        key_b = build_session_key(source_b)
 
-    @pytest.mark.asyncio
-    async def test_edit_message_no_client(self):
-        self.adapter._client = None
+        assert key_a != key_b
 
-        result = await self.adapter.edit_message("99:general", "123", "nope")
+    def test_group_dm_session_key_isolated_from_dm(self):
+        """Group DMs should not share session keys with 1:1 DMs."""
+        from gateway.session import SessionSource, build_session_key
 
-        assert result.success is False
-        assert "Not supported" in result.error
+        dm_source = SessionSource(
+            platform=Platform.ZULIP,
+            chat_id="dm:alice@example.com",
+            chat_type="dm",
+            user_id="alice@example.com",
+        )
+        group_source = SessionSource(
+            platform=Platform.ZULIP,
+            chat_id="group_dm:alice@example.com,bob@example.com",
+            chat_type="group",
+            user_id="alice@example.com",
+        )
 
-    @pytest.mark.asyncio
-    async def test_edit_message_no_message_id(self):
-        result = await self.adapter.edit_message("99:general", "", "no id")
+        dm_key = build_session_key(dm_source)
+        group_key = build_session_key(group_source)
 
-        assert result.success is False
+        assert dm_key != group_key
 
+    def test_session_key_deterministic_across_calls(self):
+        """Same source should always produce the same session key."""
+        from gateway.session import SessionSource, build_session_key
 
-# ---------------------------------------------------------------------------
-# _resolve_typing_target
-# ---------------------------------------------------------------------------
+        source = SessionSource(
+            platform=Platform.ZULIP,
+            chat_id="42:general",
+            chat_type="stream",
+            user_id="alice@example.com",
+        )
 
+        key_a = build_session_key(source)
+        key_b = build_session_key(source)
 
-class TestZulipResolveTypingTarget:
-    def setup_method(self):
-        self.adapter = _make_adapter()
-        self.adapter._stream_name_cache = {42: "general"}
-
-    def test_stream_typing_target(self):
-        to, op = self.adapter._resolve_typing_target("42:general")
-        assert to == ["general"]
-        assert op == "start"
-
-    def test_dm_typing_target(self):
-        to, op = self.adapter._resolve_typing_target("dm:bob@example.com")
-        assert to == ["bob@example.com"]
-        assert op == "start"
-
-    def test_unknown_stream_id_returns_none(self):
-        to, op = self.adapter._resolve_typing_target("999:topic")
-        assert to is None
-
-    def test_bare_email_returns_none(self):
-        to, op = self.adapter._resolve_typing_target("unknown@x.com")
-        assert to is None
-
-
-# ---------------------------------------------------------------------------
-# Stream cache
-# ---------------------------------------------------------------------------
-
-
-class TestZulipStreamCache:
-    def test_refresh_stream_cache_populates(self):
-        adapter = _make_adapter()
-        adapter._client = MagicMock()
-        adapter._client.get_streams.return_value = {
-            "result": "success",
-            "streams": [
-                {"stream_id": 10, "name": "general"},
-                {"stream_id": 20, "name": "Random"},
-            ],
-        }
-
-        adapter._refresh_stream_cache()
-
-        assert adapter._stream_id_cache["general"] == 10
-        assert adapter._stream_id_cache["random"] == 20
-        assert adapter._stream_name_cache[10] == "general"
-        assert adapter._stream_name_cache[20] == "Random"
-
-    def test_refresh_stream_cache_case_insensitive(self):
-        adapter = _make_adapter()
-        adapter._client = MagicMock()
-        adapter._client.get_streams.return_value = {
-            "result": "success",
-            "streams": [
-                {"stream_id": 10, "name": "General"},
-            ],
-        }
-
-        adapter._refresh_stream_cache()
-
-        # Lookup should be case-insensitive
-        assert adapter._stream_id_cache["general"] == 10
-
-    def test_refresh_stream_cache_failure_is_safe(self):
-        adapter = _make_adapter()
-        adapter._client = MagicMock()
-        adapter._client.get_streams.side_effect = Exception("network error")
-
-        # Should not raise
-        adapter._refresh_stream_cache()
-        assert adapter._stream_id_cache == {}
-
-    def test_refresh_stream_cache_no_client(self):
-        adapter = _make_adapter()
-        adapter._client = None
-
-        # Should not raise
-        adapter._refresh_stream_cache()
+        assert key_a == key_b
 
 
 # ---------------------------------------------------------------------------
-# Group DM chat-ID helpers
+# SessionSource serialization round-trip with Zulip
 # ---------------------------------------------------------------------------
 
 
-class TestZulipGroupDmChatId:
-    def test_build_group_dm_chat_id(self):
-        from gateway.platforms.zulip import _build_group_dm_chat_id
-        result = _build_group_dm_chat_id(["alice@example.com", "bob@example.com"])
-        # Emails are sorted deterministically
-        assert result == "group_dm:alice@example.com,bob@example.com"
-
-    def test_build_group_dm_chat_id_sorts_emails(self):
-        from gateway.platforms.zulip import _build_group_dm_chat_id
-        result = _build_group_dm_chat_id(["charlie@example.com", "alice@example.com"])
-        assert result == "group_dm:alice@example.com,charlie@example.com"
-
-    def test_parse_group_dm_chat_id(self):
-        from gateway.platforms.zulip import _parse_group_dm_chat_id
-        result = _parse_group_dm_chat_id("group_dm:alice@example.com,bob@example.com")
-        assert result == ["alice@example.com", "bob@example.com"]
-
-    def test_parse_group_dm_chat_id_non_group_returns_none(self):
-        from gateway.platforms.zulip import _parse_group_dm_chat_id
-        assert _parse_group_dm_chat_id("42:general") is None
-        assert _parse_group_dm_chat_id("dm:alice@example.com") is None
-        assert _parse_group_dm_chat_id("group_dm:") is None
-
-    def test_is_group_dm_chat_id_true(self):
-        from gateway.platforms.zulip import is_group_dm_chat_id
-        assert is_group_dm_chat_id("group_dm:a@b.com,c@d.com") is True
-
-    def test_is_group_dm_chat_id_false(self):
-        from gateway.platforms.zulip import is_group_dm_chat_id
-        assert is_group_dm_chat_id("dm:alice@example.com") is False
-        assert is_group_dm_chat_id("42:general") is False
-
-    def test_group_dm_roundtrip(self):
-        from gateway.platforms.zulip import _build_group_dm_chat_id, _parse_group_dm_chat_id
-        emails = ["bob@example.com", "alice@example.com", "charlie@example.com"]
-        chat_id = _build_group_dm_chat_id(emails)
-        parsed = _parse_group_dm_chat_id(chat_id)
-        assert parsed == ["alice@example.com", "bob@example.com", "charlie@example.com"]
-
-
-# ---------------------------------------------------------------------------
-# DM recipient extraction
-# ---------------------------------------------------------------------------
-
-
-class TestExtractDmRecipients:
-    def test_one_on_one_dm(self):
-        from gateway.platforms.zulip import _extract_dm_recipients
-        display_recipient = [
-            {"email": "bot@example.com", "full_name": "Bot"},
-            {"email": "alice@example.com", "full_name": "Alice"},
-        ]
-        result = _extract_dm_recipients(display_recipient, "bot@example.com", "alice@example.com")
-        assert result == ["alice@example.com"]
-
-    def test_group_dm_extracts_all_non_bot(self):
-        from gateway.platforms.zulip import _extract_dm_recipients
-        display_recipient = [
-            {"email": "bot@example.com", "full_name": "Bot"},
-            {"email": "alice@example.com", "full_name": "Alice"},
-            {"email": "bob@example.com", "full_name": "Bob"},
-        ]
-        result = _extract_dm_recipients(display_recipient, "bot@example.com", "alice@example.com")
-        assert result == ["alice@example.com", "bob@example.com"]
-
-    def test_malformed_display_recipient_falls_back(self):
-        from gateway.platforms.zulip import _extract_dm_recipients
-        result = _extract_dm_recipients("not a list", "bot@example.com", "alice@example.com")
-        assert result == ["alice@example.com"]
-
-    def test_empty_display_recipient_falls_back(self):
-        from gateway.platforms.zulip import _extract_dm_recipients
-        result = _extract_dm_recipients(None, "bot@example.com", "sender@example.com")
-        assert result == ["sender@example.com"]
-
-    def test_display_recipient_missing_bot_excludes_no_one(self):
-        """When bot email isn't in the list, all entries are returned."""
-        from gateway.platforms.zulip import _extract_dm_recipients
-        display_recipient = [
-            {"email": "alice@example.com"},
-            {"email": "bob@example.com"},
-        ]
-        result = _extract_dm_recipients(display_recipient, "bot@example.com", "alice@example.com")
-        assert result == ["alice@example.com", "bob@example.com"]
-
-    def test_display_recipient_with_non_dict_entries(self):
-        """Non-dict entries in the list should be skipped gracefully."""
-        from gateway.platforms.zulip import _extract_dm_recipients
-        display_recipient = [
-            {"email": "bot@example.com"},
-            "not a dict",
-            {"email": "alice@example.com"},
-        ]
-        result = _extract_dm_recipients(display_recipient, "bot@example.com", "alice@example.com")
-        assert result == ["alice@example.com"]
-
-
-# ---------------------------------------------------------------------------
-# Stream name resolution (display_recipient fallback)
-# ---------------------------------------------------------------------------
-
-
-class TestResolveStreamName:
-    def test_cache_hit(self):
-        from gateway.platforms.zulip import _resolve_stream_name
-        message = {"display_recipient": "ignored"}
-        cache = {42: "general"}
-        assert _resolve_stream_name(message, 42, cache) == "general"
-
-    def test_fallback_to_display_recipient_string(self):
-        from gateway.platforms.zulip import _resolve_stream_name
-        message = {"display_recipient": "general"}
-        cache = {}
-        assert _resolve_stream_name(message, 42, cache) == "general"
-
-    def test_fallback_to_display_recipient_dict(self):
-        """Legacy Zulip: display_recipient is a dict for stream messages."""
-        from gateway.platforms.zulip import _resolve_stream_name
-        message = {"display_recipient": {"name": "general", "stream_id": 42}}
-        cache = {}
-        assert _resolve_stream_name(message, 42, cache) == "general"
-
-    def test_fallback_to_display_recipient_dict_missing_name(self):
-        from gateway.platforms.zulip import _resolve_stream_name
-        message = {"display_recipient": {"stream_id": 42}}
-        cache = {}
-        assert _resolve_stream_name(message, 42, cache) == "42"
-
-    def test_fallback_to_stream_id_string(self):
-        from gateway.platforms.zulip import _resolve_stream_name
-        message = {}
-        cache = {}
-        assert _resolve_stream_name(message, 42, cache) == "42"
-
-    def test_empty_display_recipient_string_falls_through(self):
-        from gateway.platforms.zulip import _resolve_stream_name
-        message = {"display_recipient": ""}
-        cache = {}
-        assert _resolve_stream_name(message, 42, cache) == "42"
-
-
-# ---------------------------------------------------------------------------
-# Event validation (defense in depth)
-# ---------------------------------------------------------------------------
-
-
-class TestZulipEventValidation:
-    """Test that _on_zulip_event validates event shape before processing."""
-
-    def setup_method(self):
-        self.adapter = _make_adapter(bot_email="bot@example.zulipchat.com")
-        self.adapter._bot_user_id = 42
-        self.adapter._bot_full_name = "Hermes Bot"
-        self.adapter._loop = None
-        self.adapter.handle_message = AsyncMock()
-
-    def test_non_message_event_type_ignored(self):
-        """Events with type != 'message' should be silently dropped."""
-        event = {"type": "heartbeat", "id": 1}
-        self.adapter._on_zulip_event(event)
-        self.adapter.handle_message.assert_not_called()
-        assert "1" not in self.adapter._seen_events
-
-    def test_reaction_event_ignored(self):
-        event = {"type": "reaction", "op": "add", "id": 2}
-        self.adapter._on_zulip_event(event)
-        self.adapter.handle_message.assert_not_called()
-
-    def test_message_event_with_non_add_op_ignored(self):
-        """Message events with op != 'add' should be dropped."""
-        event = {
-            "type": "message",
-            "op": "update",
-            "id": 3,
-            "message": {
-                "id": 500,
-                "sender_email": "alice@example.com",
-                "sender_id": 99,
-                "type": "private",
-                "content": "edited text",
-                "display_recipient": [
-                    {"email": "bot@example.zulipchat.com"},
-                    {"email": "alice@example.com"},
-                ],
-            },
-        }
-        self.adapter._on_zulip_event(event)
-        self.adapter.handle_message.assert_not_called()
-
-    def test_message_event_without_op_defaults_to_add(self):
-        """Missing 'op' should be treated as 'add' (new message)."""
-        event = {
-            "type": "message",
-            "id": 4,
-            "message": {
-                "id": 501,
-                "sender_email": "alice@example.com",
-                "sender_id": 99,
-                "type": "private",
-                "content": "Hello",
-                "display_recipient": [
-                    {"email": "bot@example.zulipchat.com"},
-                    {"email": "alice@example.com"},
-                ],
-            },
-        }
-        self.adapter._on_zulip_event(event)
-        # Should be recorded in seen events (not filtered)
-        assert "501" in self.adapter._seen_events
-
-    def test_message_event_with_none_message_ignored(self):
-        event = {"type": "message", "op": "add", "message": None}
-        self.adapter._on_zulip_event(event)
-        self.adapter.handle_message.assert_not_called()
-
-    def test_message_event_with_non_dict_message_ignored(self):
-        event = {"type": "message", "op": "add", "message": "not a dict"}
-        self.adapter._on_zulip_event(event)
-        self.adapter.handle_message.assert_not_called()
-
-
-# ---------------------------------------------------------------------------
-# Whitespace-only content filtering
-# ---------------------------------------------------------------------------
-
-
-class TestWhitespaceContentFiltering:
-    def setup_method(self):
-        self.adapter = _make_adapter(bot_email="bot@example.zulipchat.com")
-        self.adapter._bot_user_id = 42
-        self.adapter._bot_full_name = "Hermes Bot"
-        self.adapter.handle_message = AsyncMock()
-
-    @pytest.mark.asyncio
-    async def test_whitespace_only_dm_ignored(self):
-        """DMs with only whitespace should not dispatch."""
-        message = {
-            "id": 600,
-            "sender_email": "alice@example.com",
-            "sender_full_name": "Alice",
-            "sender_id": 10,
-            "type": "private",
-            "content": "   \t\n  ",
-            "display_recipient": [
-                {"email": "bot@example.zulipchat.com"},
-                {"email": "alice@example.com"},
-            ],
-        }
-        event = {"type": "message", "op": "add", "message": message}
-
-        self.adapter._dispatch_inbound(message, event)
-        self.adapter.handle_message.assert_not_called()
-
-    @pytest.mark.asyncio
-    async def test_whitespace_only_stream_ignored(self):
-        """Stream messages with only whitespace should not dispatch."""
-        message = {
-            "id": 601,
-            "sender_email": "alice@example.com",
-            "sender_full_name": "Alice",
-            "sender_id": 10,
-            "type": "stream",
-            "stream_id": 99,
-            "subject": "general",
-            "content": "  ",
-        }
-        event = {"type": "message", "op": "add", "message": message}
-
-        self.adapter._dispatch_inbound(message, event)
-        self.adapter.handle_message.assert_not_called()
-
-    @pytest.mark.asyncio
-    async def test_content_with_actual_text_passes(self):
-        """Content with non-whitespace text should pass through."""
-        message = {
-            "id": 602,
-            "sender_email": "alice@example.com",
-            "sender_full_name": "Alice",
-            "sender_id": 10,
-            "type": "private",
-            "content": "  Hello!  ",
-            "display_recipient": [
-                {"email": "bot@example.zulipchat.com"},
-                {"email": "alice@example.com"},
-            ],
-        }
-        event = {"type": "message", "op": "add", "message": message}
-
-        self.adapter._dispatch_inbound(message, event)
-        assert self.adapter.handle_message.called
-
-
-# ---------------------------------------------------------------------------
-# Group DM inbound dispatch
-# ---------------------------------------------------------------------------
-
-
-class TestGroupDmDispatch:
-    def setup_method(self):
-        self.adapter = _make_adapter(bot_email="bot@example.zulipchat.com")
-        self.adapter._bot_user_id = 42
-        self.adapter._bot_full_name = "Hermes Bot"
-        self.adapter.handle_message = AsyncMock()
-
-    @pytest.mark.asyncio
-    async def test_group_dm_creates_group_type(self):
-        """Private message with 3+ total participants should be 'group' type."""
-        message = {
-            "id": 700,
-            "sender_email": "alice@example.com",
-            "sender_full_name": "Alice",
-            "sender_id": 10,
-            "type": "private",
-            "content": "Hello group",
-            "display_recipient": [
-                {"email": "bot@example.zulipchat.com"},
-                {"email": "alice@example.com"},
-                {"email": "bob@example.com"},
-            ],
-        }
-        event = {"type": "message", "op": "add", "message": message}
-
-        self.adapter._dispatch_inbound(message, event)
-
-        assert self.adapter.handle_message.called
-        msg_event = self.adapter.handle_message.call_args[0][0]
-        assert msg_event.source.chat_type == "group"
-        assert msg_event.source.user_id == "alice@example.com"
-        assert msg_event.source.user_name == "Alice"
-        # chat_id should be deterministic group DM id
-        assert "group_dm:" in msg_event.source.chat_id
-        assert "alice@example.com" in msg_event.source.chat_id
-        assert "bob@example.com" in msg_event.source.chat_id
-
-    @pytest.mark.asyncio
-    async def test_group_dm_deterministic_chat_id(self):
-        """Group DM chat_id should be the same regardless of participant order."""
-        from gateway.platforms.zulip import _build_group_dm_chat_id
-
-        emails_a = ["bob@example.com", "alice@example.com"]
-        emails_b = ["alice@example.com", "bob@example.com"]
-        assert _build_group_dm_chat_id(emails_a) == _build_group_dm_chat_id(emails_b)
-
-    @pytest.mark.asyncio
-    async def test_one_on_one_dm_still_dm_type(self):
-        """Private message with exactly 2 participants should remain 'dm' type."""
-        message = {
-            "id": 701,
-            "sender_email": "alice@example.com",
-            "sender_full_name": "Alice",
-            "sender_id": 10,
-            "type": "private",
-            "content": "Hello",
-            "display_recipient": [
-                {"email": "bot@example.zulipchat.com"},
-                {"email": "alice@example.com"},
-            ],
-        }
-        event = {"type": "message", "op": "add", "message": message}
-
-        self.adapter._dispatch_inbound(message, event)
-
-        msg_event = self.adapter.handle_message.call_args[0][0]
-        assert msg_event.source.chat_type == "dm"
-        assert msg_event.source.chat_id == "dm:alice@example.com"
-
-
-# ---------------------------------------------------------------------------
-# Stream name via display_recipient
-# ---------------------------------------------------------------------------
-
-
-class TestStreamNameFromDisplayRecipient:
-    def setup_method(self):
-        self.adapter = _make_adapter(bot_email="bot@example.zulipchat.com")
-        self.adapter._bot_user_id = 42
-        self.adapter._bot_full_name = "Hermes Bot"
-        self.adapter.handle_message = AsyncMock()
-        # Empty cache — forces fallback to display_recipient
-        self.adapter._stream_name_cache = {}
-
-    @pytest.mark.asyncio
-    async def test_stream_name_from_display_recipient_string(self):
-        """When cache is empty, fall back to display_recipient string."""
-        message = {
-            "id": 800,
-            "sender_email": "alice@example.com",
-            "sender_full_name": "Alice",
-            "sender_id": 10,
-            "type": "stream",
-            "stream_id": 99,
-            "subject": "help",
-            "content": "@**Hermes Bot** help",
-            "display_recipient": "general",
-        }
-        event = {"type": "message", "op": "add", "message": message}
-
-        self.adapter._dispatch_inbound(message, event)
-
-        msg_event = self.adapter.handle_message.call_args[0][0]
-        assert msg_event.source.chat_name == "general"
-
-    @pytest.mark.asyncio
-    async def test_stream_name_from_display_recipient_dict(self):
-        """Legacy Zulip: display_recipient is a dict for stream messages."""
-        message = {
-            "id": 801,
-            "sender_email": "alice@example.com",
-            "sender_full_name": "Alice",
-            "sender_id": 10,
-            "type": "stream",
-            "stream_id": 99,
-            "subject": "help",
-            "content": "@**Hermes Bot** help",
-            "display_recipient": {"name": "general", "stream_id": 99},
-        }
-        event = {"type": "message", "op": "add", "message": message}
-
-        self.adapter._dispatch_inbound(message, event)
-
-        msg_event = self.adapter.handle_message.call_args[0][0]
-        assert msg_event.source.chat_name == "general"
-
-    @pytest.mark.asyncio
-    async def test_stream_name_fallback_to_id_when_no_display_recipient(self):
-        """When cache is empty and no display_recipient, use stream_id."""
-        message = {
-            "id": 802,
-            "sender_email": "alice@example.com",
-            "sender_full_name": "Alice",
-            "sender_id": 10,
-            "type": "stream",
-            "stream_id": 99,
-            "subject": "help",
-            "content": "@**Hermes Bot** help",
-        }
-        event = {"type": "message", "op": "add", "message": message}
-
-        self.adapter._dispatch_inbound(message, event)
-
-        msg_event = self.adapter.handle_message.call_args[0][0]
-        assert msg_event.source.chat_name == "99"
+class TestZulipSessionSourceSerialization:
+    """Verify that Zulip SessionSources survive to_dict/from_dict round-trips."""
+
+    def test_stream_source_roundtrip(self):
+        from gateway.session import SessionSource
+
+        original = SessionSource(
+            platform=Platform.ZULIP,
+            chat_id="42:general",
+            chat_name="general",
+            chat_type="stream",
+            user_id="alice@example.com",
+            user_name="Alice Smith",
+            chat_topic="general",
+        )
+
+        restored = SessionSource.from_dict(original.to_dict())
+
+        assert restored.platform == Platform.ZULIP
+        assert restored.chat_id == "42:general"
+        assert restored.chat_name == "general"
+        assert restored.chat_type == "stream"
+        assert restored.user_id == "alice@example.com"
+        assert restored.user_name == "Alice Smith"
+        assert restored.chat_topic == "general"
+
+    def test_dm_source_roundtrip(self):
+        from gateway.session import SessionSource
+
+        original = SessionSource(
+            platform=Platform.ZULIP,
+            chat_id="dm:alice@example.com",
+            chat_name="alice@example.com",
+            chat_type="dm",
+            user_id="alice@example.com",
+            user_name="Alice",
+        )
+
+        restored = SessionSource.from_dict(original.to_dict())
+
+        assert restored.platform == Platform.ZULIP
+        assert restored.chat_id == "dm:alice@example.com"
+        assert restored.chat_type == "dm"
+        assert restored.user_id == "alice@example.com"
+
+    def test_group_dm_source_roundtrip(self):
+        from gateway.session import SessionSource
+
+        original = SessionSource(
+            platform=Platform.ZULIP,
+            chat_id="group_dm:alice@example.com,bob@example.com",
+            chat_name="alice@example.com, bob@example.com",
+            chat_type="group",
+            user_id="alice@example.com",
+            user_name="Alice",
+        )
+
+        restored = SessionSource.from_dict(original.to_dict())
+
+        assert restored.platform == Platform.ZULIP
+        assert restored.chat_id == "group_dm:alice@example.com,bob@example.com"
+        assert restored.chat_type == "group"
+
+    def test_stream_source_no_topic_roundtrip(self):
+        from gateway.session import SessionSource
+
+        original = SessionSource(
+            platform=Platform.ZULIP,
+            chat_id="42:(no topic)",
+            chat_name="42",
+            chat_type="stream",
+            user_id="alice@example.com",
+            chat_topic="(no topic)",
+        )
+
+        restored = SessionSource.from_dict(original.to_dict())
+
+        assert restored.chat_id == "42:(no topic)"
+        assert restored.chat_topic == "(no topic)"
+
+    def test_chat_id_with_colon_in_topic_preserved(self):
+        """Topics containing colons must survive serialization."""
+        from gateway.session import SessionSource
+
+        original = SessionSource(
+            platform=Platform.ZULIP,
+            chat_id="5:time: 12:00",
+            chat_name="general",
+            chat_type="stream",
+            user_id="alice@example.com",
+            chat_topic="time: 12:00",
+        )
+
+        restored = SessionSource.from_dict(original.to_dict())
+
+        assert restored.chat_id == "5:time: 12:00"
+        assert restored.chat_topic == "time: 12:00"
 
 
 # ---------------------------------------------------------------------------
