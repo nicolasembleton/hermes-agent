@@ -28,10 +28,11 @@ Build the smallest end-to-end Zulip integration that genuinely works inside Herm
   - Add a Zulip platform hint to `agent/prompt_builder.py` so the agent uses Zulip-friendly Markdown and understands streams + topics
   - Add a Zulip platform toolset in `toolsets.py` and include it in `hermes-gateway`
 
-- [ ] Expose the prototype in CLI configuration flows so it is visibly usable:
-  - Add Zulip to the interactive setup inventory in `hermes_cli/gateway.py`, reusing the Mattermost-style setup structure but with Zulip-specific bot creation instructions and env vars
-  - Add Zulip to the messaging platform section in `hermes_cli/status.py`
-  - Follow existing naming patterns exactly; do not introduce new config UX unless the repo already needs it for other platforms
+- [x] Expose the prototype in CLI configuration flows so it is visibly usable:
+   - Add Zulip to the interactive setup inventory in `hermes_cli/gateway.py`, reusing the Mattermost-style setup structure but with Zulip-specific bot creation instructions and env vars
+   - Add Zulip to the messaging platform section in `hermes_cli/status.py`
+   - Follow existing naming patterns exactly; do not introduce new config UX unless the repo already needs it for other platforms
+   - Notes: Added Zulip to `_PLATFORMS` list in `hermes_cli/gateway.py` with setup instructions for creating a generic bot on any Zulip server (cloud or self-hosted). Added `zulip`-specific status check in `_platform_status()` (like Matrix) that requires all 3 credentials (site_url + email + api_key) for "configured" status. Added Zulip to the messaging platforms dict in `hermes_cli/status.py`. Added 6 Zulip env vars to `OPTIONAL_ENV_VARS` set and dict in `hermes_cli/config.py`. Added 6 tests to `tests/hermes_cli/test_gateway.py` covering platform list membership, setup vars, status states, and setup instructions. All 98 tests pass.
 
 - [ ] Write prototype-focused automated tests before claiming the phase works:
   - Create `tests/gateway/test_zulip.py` covering enum/config loading, adapter init, self-message filtering, stream/topic chat-id generation, DM chat-id generation, inbound `MessageEvent` dispatch, and outbound send request construction with mocked Zulip client calls

@@ -38,6 +38,9 @@ _EXTRA_ENV_KEYS = frozenset({
     "WHATSAPP_MODE", "WHATSAPP_ENABLED",
     "MATTERMOST_HOME_CHANNEL", "MATTERMOST_REPLY_MODE",
     "MATRIX_PASSWORD", "MATRIX_ENCRYPTION", "MATRIX_HOME_ROOM",
+    "ZULIP_SITE_URL", "ZULIP_BOT_EMAIL", "ZULIP_API_KEY",
+    "ZULIP_ALLOWED_USERS", "ZULIP_DEFAULT_STREAM",
+    "ZULIP_HOME_TOPIC", "ZULIP_HOME_CHANNEL",
 })
 
 import yaml
@@ -776,6 +779,41 @@ OPTIONAL_ENV_VARS = {
     "MATRIX_ALLOWED_USERS": {
         "description": "Comma-separated Matrix user IDs allowed to use the bot (@user:server format)",
         "prompt": "Allowed Matrix user IDs (comma-separated)",
+        "url": None,
+        "password": False,
+        "category": "messaging",
+    },
+    "ZULIP_SITE_URL": {
+        "description": "Zulip server URL (e.g. https://your-org.zulipchat.com)",
+        "prompt": "Zulip server URL",
+        "url": "https://zulipchat.com",
+        "password": False,
+        "category": "messaging",
+    },
+    "ZULIP_BOT_EMAIL": {
+        "description": "Zulip bot email address",
+        "prompt": "Zulip bot email",
+        "url": None,
+        "password": False,
+        "category": "messaging",
+    },
+    "ZULIP_API_KEY": {
+        "description": "Zulip bot API key (from bot settings)",
+        "prompt": "Zulip bot API key",
+        "url": None,
+        "password": True,
+        "category": "messaging",
+    },
+    "ZULIP_ALLOWED_USERS": {
+        "description": "Comma-separated Zulip user emails allowed to use the bot",
+        "prompt": "Allowed Zulip user emails (comma-separated)",
+        "url": None,
+        "password": False,
+        "category": "messaging",
+    },
+    "ZULIP_DEFAULT_STREAM": {
+        "description": "Default Zulip stream name for outbound messages",
+        "prompt": "Zulip default stream",
         "url": None,
         "password": False,
         "category": "messaging",

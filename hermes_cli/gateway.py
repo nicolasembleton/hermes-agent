@@ -1220,6 +1220,35 @@ _PLATFORMS = [
              "help": "The AppSecret from your DingTalk application credentials."},
         ],
     },
+    {
+        "key": "zulip",
+        "label": "Zulip",
+        "emoji": "💬",
+        "token_var": "ZULIP_API_KEY",
+        "setup_instructions": [
+            "1. Works with any Zulip server (cloud at zulipchat.com or self-hosted)",
+            "2. Create a bot: Zulip settings → Your bots → Add a new bot",
+            "   Choose 'Generic bot' — copy the bot's email and API key",
+            "3. For self-hosted: enable the bot at your-org.zulipchat.com",
+            "4. Stream messages require @mentioning the bot to trigger a response",
+            "5. DMs to the bot are always processed (no mention needed)",
+        ],
+        "vars": [
+            {"name": "ZULIP_SITE_URL", "prompt": "Server URL (e.g. https://your-org.zulipchat.com)", "password": False,
+             "help": "Your Zulip server URL. Works with cloud and self-hosted instances."},
+            {"name": "ZULIP_BOT_EMAIL", "prompt": "Bot email address", "password": False,
+             "help": "The bot's email address from step 2 above."},
+            {"name": "ZULIP_API_KEY", "prompt": "Bot API key", "password": True,
+             "help": "Paste the API key from the bot's settings page."},
+            {"name": "ZULIP_ALLOWED_USERS", "prompt": "Allowed user emails (comma-separated)", "password": False,
+             "is_allowlist": True,
+             "help": "Email addresses of users who can interact with the bot."},
+            {"name": "ZULIP_DEFAULT_STREAM", "prompt": "Default stream name (for outbound messages, or empty)", "password": False,
+             "help": "Stream the bot sends to when no specific stream is given."},
+            {"name": "ZULIP_HOME_CHANNEL", "prompt": "Home channel stream:topic (for cron/notification delivery, or empty to set later with /set-home)", "password": False,
+             "help": "Format: stream_name:topic (e.g. general:notifications)."},
+        ],
+    },
 ]
 
 
@@ -1262,6 +1291,14 @@ def _platform_status(platform: dict) -> str:
             suffix = " + E2EE" if e2ee and e2ee.lower() in ("true", "1", "yes") else ""
             return f"configured{suffix}"
         if val or password or homeserver:
+            return "partially configured"
+        return "not configured"
+    if platform.get("key") == "zulip":
+        site_url = get_env_value("ZULIP_SITE_URL")
+        bot_email = get_env_value("ZULIP_BOT_EMAIL")
+        if val and site_url and bot_email:
+            return "configured"
+        if val or site_url or bot_email:
             return "partially configured"
         return "not configured"
     if val:

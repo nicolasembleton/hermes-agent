@@ -252,3 +252,63 @@ class TestWaitForGatewayExit:
 
         # Should not raise — ProcessLookupError means it's already gone.
         gateway._wait_for_gateway_exit(timeout=10.0, force_after=2.0)
+
+
+# ---------------------------------------------------------------------------
+# Zulip platform in gateway setup
+# ---------------------------------------------------------------------------
+
+
+def test_zulip_in_platforms_list():
+    """Zulip should appear in the gateway setup wizard platform list."""
+    from hermes_cli.gateway import _PLATFORMS
+    keys = [p["key"] for p in _PLATFORMS]
+    assert "zulip" in keys
+
+
+def test_zulip_has_required_setup_vars():
+    """Zulip platform entry should include all required env var prompts."""
+    from hermes_cli.gateway import _PLATFORMS
+    zulip_platform = next(p for p in _PLATFORMS if p["key"] == "zulip")
+    var_names = [v["name"] for v in zulip_platform["vars"]]
+    assert "ZULIP_SITE_URL" in var_names
+    assert "ZULIP_BOT_EMAIL" in var_names
+    assert "ZULIP_API_KEY" in var_names
+    assert "ZULIP_ALLOWED_USERS" in var_names
+    assert "ZULIP_DEFAULT_STREAM" in var_names
+    assert "ZULIP_HOME_CHANNEL" in var_names
+
+
+def test_zulip_platform_status_configured(monkeypatch):
+    """All three Zulip credentials set → status is 'configured'."""
+    monkeypatch.setattr(gateway, "get_env_value", lambda var: {
+        "ZULIP_API_KEY": "abc123",
+        "ZULIP_SITE_URL": "https://example.zulipchat.com",
+        "ZULIP_BOT_EMAIL": "hermes-bot@example.com",
+    }.get(var, ""))
+    result = gateway._platform_status({"key": "zulip", "token_var": "ZULIP_API_KEY"})
+    assert result == "configured"
+
+
+def test_zulip_platform_status_partially_configured(monkeypatch):
+    """Only some Zulip credentials set → status is 'partially configured'."""
+    monkeypatch.setattr(gateway, "get_env_value", lambda var: {
+        "ZULIP_API_KEY": "abc123",
+    }.get(var, ""))
+    result = gateway._platform_status({"key": "zulip", "token_var": "ZULIP_API_KEY"})
+    assert result == "partially configured"
+
+
+def test_zulip_platform_status_not_configured(monkeypatch):
+    """No Zulip credentials set → status is 'not configured'."""
+    monkeypatch.setattr(gateway, "get_env_value", lambda var: "")
+    result = gateway._platform_status({"key": "zulip", "token_var": "ZULIP_API_KEY"})
+    assert result == "not configured"
+
+
+def test_zulip_has_setup_instructions():
+    """Zulip platform should have bot creation instructions."""
+    from hermes_cli.gateway import _PLATFORMS
+    zulip_platform = next(p for p in _PLATFORMS if p["key"] == "zulip")
+    assert "setup_instructions" in zulip_platform
+    assert len(zulip_platform["setup_instructions"]) >= 3
