@@ -1,0 +1,645 @@
+"""Zulip gateway adapter.
+
+Connects to any Zulip server (cloud or self-hosted) via the official
+``zulip`` Python package.  Uses the long-polling event queue for
+real-time message delivery and the REST API for sending.
+
+Authentication uses the bot's email + API key + server URL — no OAuth
+tokens required.
+
+Environment variables:
+    ZULIP_SITE_URL           Server URL (e.g. https://your-org.zulipchat.com)
+    ZULIP_BOT_EMAIL          Bot's email address
+    ZULIP_API_KEY            Bot's API key (from Zulip bot settings)
+    ZULIP_ALLOWED_USERS      Comma-separated email addresses
+    ZULIP_DEFAULT_STREAM     Default stream for outbound messages
+    ZULIP_HOME_TOPIC         Default topic for cron/notification delivery
+    ZULIP_HOME_CHANNEL       Home stream:topic for cron/notification delivery
+"""
+
+from __future__ import annotations
+
+import asyncio
+import logging
+import os
+import re
+import threading
+import time
+from typing import Any, Dict, List, Optional, Tuple
+
+from gateway.config import Platform, PlatformConfig
+from gateway.platforms.base import (
+    BasePlatformAdapter,
+    MessageEvent,
+    MessageType,
+    SendResult,
+)
+
+logger = logging.getLogger(__name__)
+
+# Zulip message size limit — server default is 10000, but 4000 matches
+# the practical limit used by other adapters in this codebase.
+MAX_MESSAGE_LENGTH = 4000
+
+# Event-queue reconnect parameters (exponential backoff).
+_RECONNECT_BASE_DELAY = 2.0
+_RECONNECT_MAX_DELAY = 60.0
+_RECONNECT_JITTER = 0.2
+
+# ---------------------------------------------------------------------------
+# Chat-ID helpers
+#
+# Zulip uses two distinct message types:
+#   * Stream messages live in a stream and have a topic.
+#   * Direct messages (DMs) are between exactly two users.
+#
+# We encode both into a single *chat_id* string that the gateway session
+# layer can round-trip without understanding Zulip internals.
+# ---------------------------------------------------------------------------
+
+_DM_PREFIX = "dm:"
+
+
+def _build_stream_chat_id(stream_id: int, topic: str) -> str:
+    """Encode a stream message's origin as a stable chat ID.
+
+    Format: ``"{stream_id}:{topic}"``
+    """
+    return f"{stream_id}:{topic}"
+
+
+def _parse_stream_chat_id(chat_id: str) -> Optional[Tuple[int, str]]:
+    """Parse a stream chat ID back into ``(stream_id, topic)``.
+
+    Returns ``None`` if *chat_id* does not look like a stream chat ID.
+    """
+    # Stream chat IDs look like "123:some topic" — the part before the
+    # first colon must be a plain integer.
+    colon = chat_id.find(":")
+    if colon < 1:
+        return None
+    stream_part = chat_id[:colon]
+    if not stream_part.isdigit():
+        return None
+    topic = chat_id[colon + 1:] or "(no topic)"
+    return (int(stream_part), topic)
+
+
+def _build_dm_chat_id(sender_email: str) -> str:
+    """Encode a DM origin as a stable chat ID.
+
+    Format: ``"dm:{sender_email}"``
+    """
+    return f"{_DM_PREFIX}{sender_email}"
+
+
+def _parse_dm_chat_id(chat_id: str) -> Optional[str]:
+    """Parse a DM chat ID back into the sender email.
+
+    Returns ``None`` if *chat_id* does not look like a DM chat ID.
+    """
+    if chat_id.startswith(_DM_PREFIX) and "@" in chat_id:
+        return chat_id[len(_DM_PREFIX):]
+    return None
+
+
+def is_dm_chat_id(chat_id: str) -> bool:
+    """Return True if *chat_id* represents a DM conversation."""
+    return chat_id.startswith(_DM_PREFIX)
+
+
+# ---------------------------------------------------------------------------
+# Requirements check
+# ---------------------------------------------------------------------------
+
+
+def check_zulip_requirements() -> bool:
+    """Return True if the Zulip adapter can be used."""
+    api_key = os.getenv("ZULIP_API_KEY", "")
+    email = os.getenv("ZULIP_BOT_EMAIL", "")
+    site = os.getenv("ZULIP_SITE_URL", "")
+
+    if not api_key:
+        logger.debug("Zulip: ZULIP_API_KEY not set")
+        return False
+    if not email:
+        logger.warning("Zulip: ZULIP_BOT_EMAIL not set")
+        return False
+    if not site:
+        logger.warning("Zulip: ZULIP_SITE_URL not set")
+        return False
+    try:
+        import zulip  # noqa: F401
+        return True
+    except ImportError:
+        logger.warning(
+            "Zulip: zulip package not installed. "
+            "Run: pip install zulip"
+        )
+        return False
+
+
+# ---------------------------------------------------------------------------
+# Adapter
+# ---------------------------------------------------------------------------
+
+
+class ZulipAdapter(BasePlatformAdapter):
+    """Gateway adapter for Zulip (cloud or self-hosted)."""
+
+    def __init__(self, config: PlatformConfig):
+        super().__init__(config, Platform.ZULIP)
+
+        self._site_url: str = (
+            config.extra.get("site_url", "")
+            or os.getenv("ZULIP_SITE_URL", "")
+        ).rstrip("/")
+        self._bot_email: str = (
+            config.extra.get("bot_email", "")
+            or os.getenv("ZULIP_BOT_EMAIL", "")
+        )
+        self._api_key: str = (
+            config.token
+            or os.getenv("ZULIP_API_KEY", "")
+        )
+        self._default_stream: str = (
+            config.extra.get("default_stream", "")
+            or os.getenv("ZULIP_DEFAULT_STREAM", "")
+        )
+        self._home_topic: str = (
+            config.extra.get("home_topic", "")
+            or os.getenv("ZULIP_HOME_TOPIC", "")
+        )
+
+        # Zulip client (created in connect())
+        self._client: Any = None
+
+        # Background thread running the event queue.
+        self._event_thread: Optional[threading.Thread] = None
+        self._closing = False
+        self._loop: Optional[asyncio.AbstractEventLoop] = None
+
+        # Bot identity (resolved on connect)
+        self._bot_user_id: int = -1
+        self._bot_full_name: str = ""
+
+        # Dedup cache: event_id → timestamp
+        self._seen_events: Dict[str, float] = {}
+        self._SEEN_MAX = 2000
+        self._SEEN_TTL = 300  # 5 minutes
+
+        # Stream name → stream_id cache (populated on connect)
+        self._stream_id_cache: Dict[str, int] = {}
+        # stream_id → stream_name reverse cache
+        self._stream_name_cache: Dict[int, str] = {}
+
+    # ------------------------------------------------------------------
+    # Required overrides
+    # ------------------------------------------------------------------
+
+    async def connect(self) -> bool:
+        """Connect to Zulip, verify auth, and start the event queue."""
+        import zulip
+
+        if not self._site_url or not self._api_key or not self._bot_email:
+            logger.error(
+                "Zulip: missing configuration (site_url, api_key, or bot_email)"
+            )
+            return False
+
+        # Create the synchronous Zulip client.
+        self._client = zulip.Client(
+            site=self._site_url,
+            email=self._bot_email,
+            api_key=self._api_key,
+        )
+
+        # Verify credentials by fetching the bot's own profile.
+        try:
+            result = self._client.get_profile()
+        except Exception as exc:
+            logger.error("Zulip: failed to authenticate — %s", exc)
+            return False
+
+        if result.get("result") != "success":
+            msg = result.get("msg", "unknown error")
+            logger.error(
+                "Zulip: authentication failed — %s. "
+                "Check ZULIP_API_KEY, ZULIP_BOT_EMAIL, and ZULIP_SITE_URL.",
+                msg,
+            )
+            return False
+
+        profile = result.get("profile", {})
+        self._bot_user_id = profile.get("user_id", -1)
+        self._bot_full_name = profile.get("full_name", "")
+        logger.info(
+            "Zulip: authenticated as %s (user_id=%d) on %s",
+            self._bot_email,
+            self._bot_user_id,
+            self._site_url,
+        )
+
+        # Populate stream-id cache.
+        self._refresh_stream_cache()
+
+        # Start the event queue in a background thread.
+        self._loop = asyncio.get_running_loop()
+        self._closing = False
+        self._event_thread = threading.Thread(
+            target=self._run_event_queue,
+            name="zulip-event-queue",
+            daemon=True,
+        )
+        self._event_thread.start()
+
+        self._mark_connected()
+        return True
+
+    async def disconnect(self) -> None:
+        """Stop the event queue and close the client."""
+        self._closing = True
+
+        # The event thread checks _closing and will exit its loop.
+        if self._event_thread and self._event_thread.is_alive():
+            self._event_thread.join(timeout=5.0)
+
+        self._client = None
+        self._loop = None
+        logger.info("Zulip: disconnected")
+
+    async def send(
+        self,
+        chat_id: str,
+        content: str,
+        reply_to: Optional[str] = None,
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> SendResult:
+        """Send a message (or multiple chunks) to a Zulip chat."""
+        if not content:
+            return SendResult(success=True)
+
+        formatted = self.format_message(content)
+        chunks = self.truncate_message(formatted, MAX_MESSAGE_LENGTH)
+
+        last_id = None
+        for chunk in chunks:
+            result = self._do_send_message(chat_id, chunk, reply_to)
+            if result.success:
+                last_id = result.message_id
+            else:
+                return result
+
+        return SendResult(success=True, message_id=last_id)
+
+    async def get_chat_info(self, chat_id: str) -> Dict[str, Any]:
+        """Return chat name and type (dm/stream)."""
+        # Try stream first.
+        parsed = _parse_stream_chat_id(chat_id)
+        if parsed:
+            stream_id, topic = parsed
+            stream_name = self._stream_name_cache.get(stream_id, chat_id)
+            return {"name": f"#{stream_name} > {topic}", "type": "stream"}
+
+        # Try DM.
+        dm_email = _parse_dm_chat_id(chat_id)
+        if dm_email:
+            return {"name": dm_email, "type": "dm"}
+
+        return {"name": chat_id, "type": "dm"}
+
+    # ------------------------------------------------------------------
+    # Optional overrides
+    # ------------------------------------------------------------------
+
+    async def send_typing(
+        self, chat_id: str, metadata: Optional[Dict[str, Any]] = None
+    ) -> None:
+        """Send a typing indicator to Zulip."""
+        if not self._client:
+            return
+
+        to, op = self._resolve_typing_target(chat_id)
+        if not to:
+            return
+
+        try:
+            self._client.set_typing_status({"to": to, "op": op})
+        except Exception:
+            pass  # Non-critical — don't spam logs.
+
+    async def edit_message(
+        self, chat_id: str, message_id: str, content: str
+    ) -> SendResult:
+        """Edit an existing message."""
+        if not self._client or not message_id:
+            return SendResult(success=False, error="Not supported")
+
+        formatted = self.format_message(content)
+        try:
+            result = self._client.update_message({
+                "message_id": int(message_id),
+                "content": formatted,
+            })
+            if result.get("result") == "success":
+                return SendResult(success=True, message_id=message_id)
+            else:
+                return SendResult(
+                    success=False,
+                    error=result.get("msg", "update failed"),
+                )
+        except Exception as exc:
+            return SendResult(success=False, error=str(exc))
+
+    def format_message(self, content: str) -> str:
+        """Zulip supports standard Markdown including code blocks, tables,
+        LaTeX math, and image links.  Strip image markdown into plain
+        URLs so the base class can extract and send them as attachments.
+        """
+        content = re.sub(r"!\[([^\]]*)\]\(([^)]+)\)", r"\2", content)
+        return content
+
+    # ------------------------------------------------------------------
+    # Internal: sending
+    # ------------------------------------------------------------------
+
+    def _do_send_message(
+        self,
+        chat_id: str,
+        content: str,
+        reply_to: Optional[str] = None,
+    ) -> SendResult:
+        """Build the correct request dict and call the Zulip API.
+
+        This is synchronous because the Zulip client is not async.
+        """
+        if not self._client:
+            return SendResult(success=False, error="Not connected")
+
+        # Determine message type and recipient from chat_id.
+        parsed = _parse_stream_chat_id(chat_id)
+        if parsed:
+            stream_id, topic = parsed
+            request: Dict[str, Any] = {
+                "type": "stream",
+                "to": str(stream_id),
+                "topic": topic,
+                "content": content,
+            }
+        elif _parse_dm_chat_id(chat_id):
+            email = _parse_dm_chat_id(chat_id)
+            request = {
+                "type": "private",
+                "to": [email],
+                "content": content,
+            }
+        else:
+            # Fallback: treat as DM to the email itself.
+            request = {
+                "type": "private",
+                "to": [chat_id],
+                "content": content,
+            }
+
+        try:
+            result = self._client.send_message(request)
+            if result.get("result") == "success":
+                msg_id = result.get("id")
+                return SendResult(success=True, message_id=str(msg_id) if msg_id else None)
+            else:
+                return SendResult(
+                    success=False,
+                    error=result.get("msg", "send failed"),
+                )
+        except Exception as exc:
+            logger.error("Zulip: send_message failed — %s", exc)
+            return SendResult(success=False, error=str(exc))
+
+    def _resolve_typing_target(
+        self, chat_id: str
+    ) -> Tuple[Optional[List[str]], str]:
+        """Return ``(to, op)`` for a typing notification.
+
+        *op* is ``"start"`` (the caller can ignore stop — Zulip auto-expires).
+        """
+        parsed = _parse_stream_chat_id(chat_id)
+        if parsed:
+            stream_id, topic = parsed
+            stream_name = self._stream_name_cache.get(stream_id)
+            if stream_name:
+                # For stream messages, typing goes to the stream (no topic needed).
+                return [stream_name], "start"
+        dm_email = _parse_dm_chat_id(chat_id)
+        if dm_email:
+            return [dm_email], "start"
+        return None, "start"
+
+    # ------------------------------------------------------------------
+    # Internal: event queue
+    # ------------------------------------------------------------------
+
+    def _run_event_queue(self) -> None:
+        """Run the Zulip event queue in the current thread.
+
+        Uses ``call_on_each_event`` which internally handles long-polling
+        and basic reconnection.  Wraps with our own exponential backoff
+        for the cases where the Zulip client's internal retry gives up.
+        """
+        delay = _RECONNECT_BASE_DELAY
+        while not self._closing:
+            try:
+                self._client.call_on_each_event(
+                    self._on_zulip_event,
+                    event_types=["message"],
+                )
+                # If call_on_each_event returns (it shouldn't normally),
+                # reset delay and restart.
+                delay = _RECONNECT_BASE_DELAY
+            except Exception as exc:
+                if self._closing:
+                    return
+                logger.warning(
+                    "Zulip: event queue error: %s — reconnecting in %.0fs",
+                    exc,
+                    delay,
+                )
+
+            if self._closing:
+                return
+
+            # Exponential backoff with jitter.
+            import random
+            jitter = delay * _RECONNECT_JITTER * random.random()
+            time.sleep(delay + jitter)
+            delay = min(delay * 2, _RECONNECT_MAX_DELAY)
+
+    def _on_zulip_event(self, event: Dict[str, Any]) -> None:
+        """Callback invoked by ``call_on_each_event`` for each event.
+
+        Runs in the event-queue thread.  Schedules the actual processing
+        on the asyncio event loop via ``call_soon_threadsafe``.
+        """
+        if self._closing:
+            return
+
+        # Extract message payload.
+        message = event.get("message")
+        if not message:
+            return
+
+        # Dedup by Zulip message ID.
+        msg_id = str(message.get("id", ""))
+        self._prune_seen()
+        if msg_id and msg_id in self._seen_events:
+            return
+        if msg_id:
+            self._seen_events[msg_id] = time.time()
+
+        # Filter self-messages.
+        sender_email = message.get("sender_email", "")
+        sender_id = message.get("sender_id", -1)
+        if sender_email == self._bot_email or sender_id == self._bot_user_id:
+            return
+
+        # Schedule async processing on the main event loop.
+        if self._loop and not self._loop.is_closed():
+            self._loop.call_soon_threadsafe(
+                self._dispatch_inbound, message, event
+            )
+
+    def _dispatch_inbound(self, message: Dict[str, Any], raw_event: Dict[str, Any]) -> None:
+        """Process an inbound message on the asyncio event loop.
+
+        Creates a :class:`MessageEvent` and dispatches it via
+        ``self.handle_message()``.
+        """
+        import asyncio
+
+        # Determine message type and chat context.
+        msg_type_name = message.get("type", "")  # "stream" or "private"
+        content = message.get("content", "")
+        sender_email = message.get("sender_email", "")
+        sender_full_name = message.get("sender_full_name", "") or sender_email
+        sender_id = message.get("sender_id", -1)
+        msg_id = str(message.get("id", ""))
+
+        if msg_type_name == "stream":
+            stream_id = message.get("stream_id", -1)
+            topic = message.get("subject", "(no topic)")
+            chat_id = _build_stream_chat_id(stream_id, topic)
+            chat_type = "stream"
+            chat_name = self._stream_name_cache.get(
+                stream_id, str(stream_id)
+            )
+            chat_topic = topic
+            user_id = sender_email
+            user_name = sender_full_name
+
+            # Check for @mention of the bot in stream messages.
+            # DMs are always processed.
+            mention_patterns = [
+                f"@**{self._bot_full_name}**",
+                f"@{self._bot_email}",
+            ]
+            has_mention = any(
+                pattern.lower() in content.lower()
+                for pattern in mention_patterns
+            )
+            if not has_mention:
+                logger.debug(
+                    "Zulip: skipping stream message without @mention "
+                    "(stream=%s, topic=%s)",
+                    chat_name,
+                    topic,
+                )
+                return
+        elif msg_type_name == "private":
+            display_recipient = message.get("display_recipient")
+            # For 1:1 DMs, display_recipient is a single-user list.
+            if isinstance(display_recipient, list):
+                for user in display_recipient:
+                    if isinstance(user, dict) and user.get("email") != self._bot_email:
+                        chat_id = _build_dm_chat_id(user["email"])
+                        break
+                else:
+                    chat_id = _build_dm_chat_id(sender_email)
+            else:
+                chat_id = _build_dm_chat_id(sender_email)
+
+            chat_type = "dm"
+            chat_name = sender_email
+            chat_topic = None
+            user_id = sender_email
+            user_name = sender_full_name
+        else:
+            logger.debug("Zulip: ignoring message of type '%s'", msg_type_name)
+            return
+
+        if not content:
+            return
+
+        # Determine message_type.
+        mt = MessageType.TEXT
+        if content.startswith("/") or content.startswith("!"):
+            mt = MessageType.COMMAND
+
+        # Reply-to detection (Zulip uses top-level reply metadata).
+        reply_to_id = None
+        # The Zulip event includes the message we're replying to in some
+        # cases — but for now we handle outbound replies in send() via
+        # the reply_to parameter.
+
+        source = self.build_source(
+            chat_id=chat_id,
+            chat_name=chat_name,
+            chat_type=chat_type,
+            user_id=user_id,
+            user_name=user_name,
+            chat_topic=chat_topic,
+        )
+
+        msg_event = MessageEvent(
+            text=content,
+            message_type=mt,
+            source=source,
+            raw_message=raw_event,
+            message_id=msg_id,
+            reply_to_message_id=reply_to_id,
+        )
+
+        # Schedule the handler coroutine on the event loop.
+        asyncio.ensure_future(self.handle_message(msg_event))
+
+    # ------------------------------------------------------------------
+    # Internal: caches & helpers
+    # ------------------------------------------------------------------
+
+    def _refresh_stream_cache(self) -> None:
+        """Fetch all streams and cache name ↔ ID mappings."""
+        if not self._client:
+            return
+        try:
+            result = self._client.get_streams()
+            if result.get("result") == "success":
+                for stream in result.get("streams", []):
+                    sid = stream.get("stream_id")
+                    name = stream.get("name", "")
+                    if sid is not None and name:
+                        self._stream_id_cache[name.lower()] = sid
+                        self._stream_name_cache[sid] = name
+                logger.info(
+                    "Zulip: cached %d streams", len(self._stream_id_cache)
+                )
+        except Exception as exc:
+            logger.warning("Zulip: failed to fetch streams — %s", exc)
+
+    def _prune_seen(self) -> None:
+        """Remove expired entries from the dedup cache."""
+        if len(self._seen_events) < self._SEEN_MAX:
+            return
+        now = time.time()
+        self._seen_events = {
+            eid: ts
+            for eid, ts in self._seen_events.items()
+            if now - ts < self._SEEN_TTL
+        }

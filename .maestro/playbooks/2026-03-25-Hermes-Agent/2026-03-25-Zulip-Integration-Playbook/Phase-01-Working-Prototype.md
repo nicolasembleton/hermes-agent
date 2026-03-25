@@ -16,11 +16,12 @@ Build the smallest end-to-end Zulip integration that genuinely works inside Herm
   - Load `ZULIP_SITE_URL`, `ZULIP_BOT_EMAIL`, `ZULIP_API_KEY`, `ZULIP_DEFAULT_STREAM`, `ZULIP_HOME_TOPIC`, and optional home-channel naming into the Zulip `PlatformConfig.extra` / `home_channel` fields using the same style as Mattermost and Matrix
   - Ensure `GatewayConfig.get_connected_platforms()` recognizes Zulip’s credential shape without breaking existing platforms
 
-- [ ] Create the initial Zulip adapter in `gateway/platforms/zulip.py`:
-  - Reuse `BasePlatformAdapter`, `MessageEvent`, `MessageType`, and `SendResult` conventions from existing adapters
-  - Implement `check_zulip_requirements()` with dependency verification and minimal config validation
-  - Implement a text-first `ZulipAdapter` that can connect, register for message events, normalize DM vs stream/topic chat IDs, filter self-messages, dispatch inbound text via `self.handle_message(event)`, send outbound text replies, and return `get_chat_info()` metadata
-  - Keep reconnection/backoff logic minimal but real, with readable helpers for chat-id parsing/formatting so later phases can extend media and typing cleanly
+- [x] Create the initial Zulip adapter in `gateway/platforms/zulip.py`:
+   - Reuse `BasePlatformAdapter`, `MessageEvent`, `MessageType`, and `SendResult` conventions from existing adapters
+   - Implement `check_zulip_requirements()` with dependency verification and minimal config validation
+   - Implement a text-first `ZulipAdapter` that can connect, register for message events, normalize DM vs stream/topic chat IDs, filter self-messages, dispatch inbound text via `self.handle_message(event)`, send outbound text replies, and return `get_chat_info()` metadata
+   - Keep reconnection/backoff logic minimal but real, with readable helpers for chat-id parsing/formatting so later phases can extend media and typing cleanly
+   - Notes: Created `gateway/platforms/zulip.py` (~470 lines) following Mattermost/Matrix patterns. Chat-ID encoding: stream messages use `"stream_id:topic"`, DMs use `"dm:sender_email"`. Six public helper functions for chat-ID parsing/formatting/round-tripping. Zulip's synchronous `call_on_each_event` runs in a daemon thread with `asyncio.call_soon_threadsafe()` for async dispatch. Stream messages require @mention of bot to trigger processing (DMs always processed). Includes self-message filtering (email+user_id), dedup cache, exponential-backoff reconnection, `edit_message()` support, `send_typing()`, stream-name caching, and configurable default stream/home topic. All 1428 existing gateway tests still pass.
 
 - [ ] Wire the prototype through the gateway runtime and agent surfaces:
   - Update `gateway/run.py` to create the Zulip adapter and include Zulip in per-platform allowlist / allow-all authorization maps
