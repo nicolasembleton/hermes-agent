@@ -133,6 +133,12 @@ ZULIP_DEFAULT_STREAM=general
 # Mention gating (default: true)
 # ZULIP_REQUIRE_MENTION=false
 
+# TLS for self-hosted/local Zulip with private CA or self-signed certs
+# Preferred: trust your local CA explicitly
+# ZULIP_CERT_BUNDLE=/path/to/ca.pem
+# Temporary local-dev fallback only:
+# ZULIP_ALLOW_INSECURE=true   # disables TLS verification
+
 # Streams where @mention is not required (comma-separated names or IDs)
 # ZULIP_FREE_RESPONSE_STREAMS=bot-commands,42
 ```
@@ -147,10 +153,10 @@ group_sessions_per_user: true
 
 ### Start the Gateway
 
-Once configured, start the gateway:
+Once configured, start the gateway in the foreground:
 
 ```bash
-hermes gateway
+hermes gateway run
 ```
 
 The bot should connect to your Zulip server within a few seconds. You'll see a log message like:
@@ -162,7 +168,7 @@ Zulip: authenticated as hermes-bot@your-org.zulipchat.com (user_id=123) on https
 Send it a DM or @mention it in a stream to test.
 
 :::tip
-You can run `hermes gateway` in the background or as a systemd/launchd service for persistent operation. See the deployment docs for details.
+Use `hermes gateway run` for a foreground test run. Once that works, you can install the systemd/launchd service for persistent operation.
 :::
 
 ## Home Channel
@@ -181,7 +187,7 @@ Add this to your `~/.hermes/.env`:
 ZULIP_HOME_CHANNEL=general:notifications
 ```
 
-The format is `stream_name:topic`. The bot will send cron job results, background task completions, and other proactive notifications to this location.
+The format is `stream_name:topic`. Hermes resolves the stream name to the correct Zulip stream ID before sending, so manual config stays human-readable.
 
 You can also use `ZULIP_DEFAULT_STREAM` and `ZULIP_HOME_TOPIC` as separate variables, but `ZULIP_HOME_CHANNEL` takes precedence when set.
 
@@ -282,7 +288,7 @@ If this prints the bot's profile, the credentials are valid.
 
 ```bash
 pip install zulip
-hermes gateway
+hermes gateway run
 ```
 
 ### Event queue disconnects / reconnection loops
@@ -295,7 +301,7 @@ hermes gateway
 
 **Cause**: The Hermes gateway isn't running, or it failed to connect.
 
-**Fix**: Check that `hermes gateway` is running. Look at the terminal output for error messages. Common issues: wrong server URL, expired API key, Zulip server unreachable.
+**Fix**: Check that `hermes gateway run` is running. Look at the terminal output or `~/.hermes/logs/gateway.log` / `~/.hermes/logs/gateway.error.log` for error messages. Common issues: wrong server URL, stale API key, Zulip server unreachable, or self-signed TLS without `ZULIP_CERT_BUNDLE` / `ZULIP_ALLOW_INSECURE`.
 
 ### "User not allowed" / Bot ignores you
 

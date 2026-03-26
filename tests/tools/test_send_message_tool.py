@@ -668,7 +668,7 @@ class TestSendZulipStandalone:
         monkeypatch.setitem(sys.modules, "zulip", zulip_mod)
 
         pconfig = SimpleNamespace(
-            token="key123",
+            token="***",
             extra={"site_url": "https://chat.example.com", "bot_email": "bot@example.com"},
         )
 
@@ -682,6 +682,30 @@ class TestSendZulipStandalone:
             "to": "99",
             "topic": "General",
             "content": "Hello stream",
+        })
+
+    def test_sends_stream_message_from_stream_name(self, monkeypatch):
+        client = MagicMock()
+        client.get_stream_id = MagicMock(return_value={"result": "success", "stream_id": 99})
+        client.send_message = MagicMock(return_value={"result": "success", "id": 43})
+
+        zulip_mod = SimpleNamespace(Client=lambda **kw: client)
+        monkeypatch.setitem(sys.modules, "zulip", zulip_mod)
+
+        pconfig = SimpleNamespace(
+            token="***",
+            extra={"site_url": "https://chat.example.com", "bot_email": "bot@example.com"},
+        )
+
+        result = asyncio.run(_send_zulip(pconfig, "general:Notifications", "Hello named stream"))
+
+        assert result["success"] is True
+        client.get_stream_id.assert_called_once_with("general")
+        client.send_message.assert_called_once_with({
+            "type": "stream",
+            "to": "99",
+            "topic": "Notifications",
+            "content": "Hello named stream",
         })
 
     def test_sends_dm(self, monkeypatch):
@@ -751,9 +775,33 @@ class TestSendZulipStandalone:
         monkeypatch.setitem(sys.modules, "zulip", zulip_mod)
 
         # Missing site_url
-        pconfig = SimpleNamespace(token="key", extra={"site_url": "", "bot_email": "bot@x.com"})
+        pconfig = SimpleNamespace(token="***", extra={"site_url": "", "bot_email": "bot@x.com"})
         result = asyncio.run(_send_zulip(pconfig, "dm:user@x.com", "test"))
         assert "not fully configured" in result["error"]
+
+    def test_passes_tls_options_to_zulip_client(self, monkeypatch):
+        captured = {}
+        client = MagicMock()
+        client.send_message = MagicMock(return_value={"result": "success", "id": 44})
+
+        def client_ctor(**kw):
+            captured.update(kw)
+            return client
+
+        zulip_mod = SimpleNamespace(Client=client_ctor)
+        monkeypatch.setitem(sys.modules, "zulip", zulip_mod)
+        monkeypatch.setenv("ZULIP_CERT_BUNDLE", "/tmp/zulip-ca.pem")
+        monkeypatch.setenv("ZULIP_ALLOW_INSECURE", "true")
+
+        pconfig = SimpleNamespace(
+            token="***",
+            extra={"site_url": "https://chat.example.com", "bot_email": "bot@example.com"},
+        )
+        result = asyncio.run(_send_zulip(pconfig, "99:General", "Hello TLS"))
+
+        assert result["success"] is True
+        assert captured["cert_bundle"] == "/tmp/zulip-ca.pem"
+        assert captured["insecure"] is True
 
     def test_fallback_treats_unknown_chat_id_as_email(self, monkeypatch):
         """When chat_id doesn't match any known format, treat as a bare email."""
@@ -881,6 +929,32 @@ class TestSendMessageToolZulip:
             zulip_cfg,
             "42:Home",
             "hello home",
+            thread_id=None,
+            media_files=[],
+        )
+
+    def test_sends_stream_name_home_channel_when_no_target_specified(self):
+        home = SimpleNamespace(chat_id="general:notifications")
+        config, zulip_cfg = self._make_zulip_config(home_channel=home)
+
+        with patch("gateway.config.load_gateway_config", return_value=config), \
+             patch("tools.interrupt.is_interrupted", return_value=False), \
+             patch("model_tools._run_async", side_effect=_run_async_immediately), \
+             patch("tools.send_message_tool._send_to_platform", new=AsyncMock(return_value={"success": True})) as send_mock:
+            result = json.loads(
+                send_message_tool({
+                    "action": "send",
+                    "target": "zulip",
+                    "message": "hello named home",
+                })
+            )
+
+        assert result["success"] is True
+        send_mock.assert_awaited_once_with(
+            Platform.ZULIP,
+            zulip_cfg,
+            "general:notifications",
+            "hello named home",
             thread_id=None,
             media_files=[],
         )

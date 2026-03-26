@@ -1250,7 +1250,7 @@ _PLATFORMS = [
             {"name": "ZULIP_DEFAULT_STREAM", "prompt": "Default stream name (for outbound messages, or empty)", "password": False,
              "help": "Stream the bot sends to when no specific stream is given."},
             {"name": "ZULIP_HOME_CHANNEL", "prompt": "Home channel stream:topic (for cron/notification delivery, or empty to set later with /set-home)", "password": False,
-             "help": "Format: stream_name:topic (e.g. general:notifications)."},
+             "help": "Format: stream_name:topic (e.g. general:notifications). Hermes resolves the stream name to the real Zulip stream ID."},
         ],
     },
 ]

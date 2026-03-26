@@ -16,6 +16,8 @@ Environment variables:
     ZULIP_DEFAULT_STREAM     Default stream for outbound messages
     ZULIP_HOME_TOPIC         Default topic for cron/notification delivery
     ZULIP_HOME_CHANNEL       Home stream:topic for cron/notification delivery
+    ZULIP_CERT_BUNDLE        Path to a CA bundle for self-hosted/self-signed TLS
+    ZULIP_ALLOW_INSECURE     If "true", disable TLS verification (dev only)
     ZULIP_REQUIRE_MENTION    Require @mention in streams (default: "true")
     ZULIP_FREE_RESPONSE_STREAMS  Comma-separated stream names or IDs that
                              don't require @mention
@@ -107,12 +109,13 @@ def _build_stream_chat_id(stream_id: int, topic: str) -> str:
 
 
 def _parse_stream_chat_id(chat_id: str) -> Optional[Tuple[int, str]]:
-    """Parse a stream chat ID back into ``(stream_id, topic)``.
+    """Parse a canonical stream chat ID back into ``(stream_id, topic)``.
 
-    Returns ``None`` if *chat_id* does not look like a stream chat ID.
+    Returns ``None`` if *chat_id* does not look like a canonical stream chat
+    ID with a numeric stream ID prefix.
     """
-    # Stream chat IDs look like "123:some topic" — the part before the
-    # first colon must be a plain integer.
+    # Canonical stream chat IDs look like "123:some topic" — the part before
+    # the first colon must be a plain integer.
     colon = chat_id.find(":")
     if colon < 1:
         return None
@@ -121,6 +124,29 @@ def _parse_stream_chat_id(chat_id: str) -> Optional[Tuple[int, str]]:
         return None
     topic = chat_id[colon + 1:] or "(no topic)"
     return (int(stream_part), topic)
+
+
+def _parse_stream_name_topic(chat_id: str) -> Optional[Tuple[str, str]]:
+    """Parse a documented ``stream_name:topic`` target.
+
+    This is intentionally separate from :func:`_parse_stream_chat_id` because
+    the canonical internal format uses numeric stream IDs, while config/docs
+    may use human-friendly stream names.
+    """
+    colon = chat_id.find(":")
+    if colon < 1:
+        return None
+    stream_name = chat_id[:colon].strip()
+    topic = chat_id[colon + 1:] or "(no topic)"
+    if not stream_name or stream_name.isdigit():
+        return None
+    if chat_id.startswith(_DM_PREFIX) or chat_id.startswith(_GROUP_DM_PREFIX):
+        return None
+    if stream_name in {"dm", "group_dm"}:
+        return None
+    if "@" in stream_name:
+        return None
+    return stream_name, topic
 
 
 def _build_dm_chat_id(sender_email: str) -> str:
@@ -311,6 +337,10 @@ class ZulipAdapter(BasePlatformAdapter):
             config.extra.get("home_topic", "")
             or os.getenv("ZULIP_HOME_TOPIC", "")
         )
+        self._cert_bundle: str = os.getenv("ZULIP_CERT_BUNDLE", "")
+        self._allow_insecure: bool = os.getenv(
+            "ZULIP_ALLOW_INSECURE", "false"
+        ).lower() in ("true", "1", "yes")
 
         # Mention gating configuration (follows Discord's pattern).
         self._require_mention: bool = os.getenv(
@@ -367,11 +397,17 @@ class ZulipAdapter(BasePlatformAdapter):
             return False
 
         # Create the synchronous Zulip client.
-        self._client = zulip.Client(
-            site=self._site_url,
-            email=self._bot_email,
-            api_key=self._api_key,
-        )
+        client_kwargs: Dict[str, Any] = {
+            "site": self._site_url,
+            "email": self._bot_email,
+            "api_key": self._api_key,
+        }
+        if self._cert_bundle:
+            client_kwargs["cert_bundle"] = self._cert_bundle
+        if self._allow_insecure:
+            client_kwargs["insecure"] = True
+
+        self._client = zulip.Client(**client_kwargs)
 
         # Verify credentials by fetching the bot's own profile.
         try:
@@ -768,30 +804,49 @@ class ZulipAdapter(BasePlatformAdapter):
                 "topic": topic,
                 "content": content,
             }
-        elif is_dm_chat_id(chat_id):
-            email = _parse_dm_chat_id(chat_id)
-            request = {
-                "type": "private",
-                "to": [email],
-                "content": content,
-            }
-        elif is_group_dm_chat_id(chat_id):
-            emails = _parse_group_dm_chat_id(chat_id)
-            if emails:
+        else:
+            named_stream = _parse_stream_name_topic(chat_id)
+            if named_stream:
+                stream_name, topic = named_stream
+                result = self._client.get_stream_id(stream_name)
+                if result.get("result") != "success":
+                    return SendResult(
+                        success=False,
+                        error=result.get("msg", f"Stream '{stream_name}' not found"),
+                    )
+                stream_id = result.get("stream_id")
+                if stream_id is None:
+                    return SendResult(success=False, error=f"Stream '{stream_name}' not found")
                 request = {
-                    "type": "private",
-                    "to": emails,
+                    "type": "stream",
+                    "to": str(stream_id),
+                    "topic": topic,
                     "content": content,
                 }
+            elif is_dm_chat_id(chat_id):
+                email = _parse_dm_chat_id(chat_id)
+                request = {
+                    "type": "private",
+                    "to": [email],
+                    "content": content,
+                }
+            elif is_group_dm_chat_id(chat_id):
+                emails = _parse_group_dm_chat_id(chat_id)
+                if emails:
+                    request = {
+                        "type": "private",
+                        "to": emails,
+                        "content": content,
+                    }
+                else:
+                    return SendResult(success=False, error="Invalid group DM chat ID")
             else:
-                return SendResult(success=False, error="Invalid group DM chat ID")
-        else:
-            # Fallback: treat as DM to the email itself.
-            request = {
-                "type": "private",
-                "to": [chat_id],
-                "content": content,
-            }
+                # Fallback: treat as DM to the email itself.
+                request = {
+                    "type": "private",
+                    "to": [chat_id],
+                    "content": content,
+                }
 
         try:
             result = self._client.send_message(request)

@@ -466,6 +466,40 @@ class TestZulipConnect:
         assert result is False
 
     @pytest.mark.asyncio
+    async def test_connect_passes_tls_options_to_client(self, monkeypatch):
+        """Local/self-hosted Zulip setups may need custom TLS options."""
+        monkeypatch.setenv("ZULIP_CERT_BUNDLE", "/tmp/zulip-ca.pem")
+        monkeypatch.setenv("ZULIP_ALLOW_INSECURE", "true")
+
+        adapter = _make_adapter()
+
+        mock_client = MagicMock()
+        mock_client.get_profile.return_value = {
+            "result": "success",
+            "profile": {"user_id": 42, "full_name": "Hermes Bot"},
+        }
+        mock_client.get_streams.return_value = {
+            "result": "success",
+            "streams": [{"stream_id": 10, "name": "general"}],
+        }
+        mock_client.call_on_each_event.side_effect = lambda *args, **kwargs: setattr(adapter, "_closing", True)
+
+        client_ctor = MagicMock(return_value=mock_client)
+        adapter._loop = asyncio.get_running_loop()
+
+        with patch.dict("sys.modules", {"zulip": MagicMock(Client=client_ctor)}):
+            result = await adapter.connect()
+
+        assert result is True
+        client_ctor.assert_called_once_with(
+            site="https://example.zulipchat.com",
+            email="hermes-bot@example.zulipchat.com",
+            api_key="zlp_test_key",
+            cert_bundle="/tmp/zulip-ca.pem",
+            insecure=True,
+        )
+
+    @pytest.mark.asyncio
     async def test_disconnect_clears_client(self):
         adapter = _make_adapter()
         adapter._client = MagicMock()
@@ -2175,6 +2209,28 @@ class TestZulipStreamSendPath:
         assert result.success is True
         call_args = self.adapter._client.send_message.call_args[0][0]
         assert call_args["topic"] == "(no topic)"
+
+    def test_send_stream_name_and_topic_resolves_stream_id(self):
+        """Documented stream_name:topic format should resolve before sending."""
+        self.adapter._client.get_stream_id.return_value = {
+            "result": "success",
+            "stream_id": 42,
+        }
+        self.adapter._client.send_message.return_value = {
+            "result": "success",
+            "id": 2003,
+        }
+
+        result = self.adapter._do_send_message("general:notifications", "Hello stream by name!")
+
+        assert result.success is True
+        self.adapter._client.get_stream_id.assert_called_once_with("general")
+        self.adapter._client.send_message.assert_called_once_with({
+            "type": "stream",
+            "to": "42",
+            "topic": "notifications",
+            "content": "Hello stream by name!",
+        })
 
     def test_send_stream_api_failure(self):
         """API errors on stream send return failed SendResult."""

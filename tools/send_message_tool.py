@@ -758,6 +758,8 @@ async def _send_zulip(pconfig, chat_id: str, message: str):
     site_url = (pconfig.extra.get("site_url") or "").rstrip("/")
     bot_email = pconfig.extra.get("bot_email", "")
     api_key = pconfig.token or ""
+    cert_bundle = os.getenv("ZULIP_CERT_BUNDLE", "") or None
+    insecure = os.getenv("ZULIP_ALLOW_INSECURE", "false").lower() in ("true", "1", "yes")
 
     if not site_url or not bot_email or not api_key:
         return {
@@ -778,7 +780,16 @@ async def _send_zulip(pconfig, chat_id: str, message: str):
     except ImportError as exc:
         return {"error": f"Failed to import Zulip adapter helpers: {exc}"}
 
-    client = zulip.Client(site=site_url, email=bot_email, api_key=api_key)
+    client_kwargs = {
+        "site": site_url,
+        "email": bot_email,
+        "api_key": api_key,
+    }
+    if cert_bundle:
+        client_kwargs["cert_bundle"] = cert_bundle
+    if insecure:
+        client_kwargs["insecure"] = True
+    client = zulip.Client(**client_kwargs)
 
     # Determine message type from chat_id.
     parsed_stream = _parse_stream_chat_id(chat_id)
@@ -791,28 +802,46 @@ async def _send_zulip(pconfig, chat_id: str, message: str):
             "content": message,
         }
     else:
-        dm_email = _parse_dm_chat_id(chat_id)
-        if dm_email:
+        from gateway.platforms.zulip import _parse_stream_name_topic
+
+        named_stream = _parse_stream_name_topic(chat_id)
+        if named_stream:
+            stream_name, topic = named_stream
+            stream_result = client.get_stream_id(stream_name)
+            if stream_result.get("result") != "success":
+                return {"error": f"Zulip API error: {stream_result.get('msg', 'unknown')}"}
+            stream_id = stream_result.get("stream_id")
+            if stream_id is None:
+                return {"error": f"Zulip API error: Stream '{stream_name}' not found"}
             request = {
-                "type": "private",
-                "to": [dm_email],
+                "type": "stream",
+                "to": str(stream_id),
+                "topic": topic,
                 "content": message,
             }
         else:
-            group_emails = _parse_group_dm_chat_id(chat_id)
-            if group_emails:
+            dm_email = _parse_dm_chat_id(chat_id)
+            if dm_email:
                 request = {
                     "type": "private",
-                    "to": group_emails,
+                    "to": [dm_email],
                     "content": message,
                 }
             else:
-                # Fallback: treat the entire chat_id as a single email.
-                request = {
-                    "type": "private",
-                    "to": [chat_id],
-                    "content": message,
-                }
+                group_emails = _parse_group_dm_chat_id(chat_id)
+                if group_emails:
+                    request = {
+                        "type": "private",
+                        "to": group_emails,
+                        "content": message,
+                    }
+                else:
+                    # Fallback: treat the entire chat_id as a single email.
+                    request = {
+                        "type": "private",
+                        "to": [chat_id],
+                        "content": message,
+                    }
 
     try:
         result = client.send_message(request)
