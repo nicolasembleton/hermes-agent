@@ -55,6 +55,7 @@ class Platform(Enum):
     EMAIL = "email"
     SMS = "sms"
     DINGTALK = "dingtalk"
+    ZULIP = "zulip"
     API_SERVER = "api_server"
     WEBHOOK = "webhook"
 
@@ -267,6 +268,9 @@ class GatewayConfig:
                 connected.append(platform)
             # SMS uses api_key (Twilio auth token) — SID checked via env
             elif platform == Platform.SMS and os.getenv("TWILIO_ACCOUNT_SID"):
+                connected.append(platform)
+            # Zulip uses extra dict for site_url (token also checked above)
+            elif platform == Platform.ZULIP and config.extra.get("site_url"):
                 connected.append(platform)
             # API Server uses enabled flag only (no token needed)
             elif platform == Platform.API_SERVER:
@@ -568,6 +572,7 @@ def load_gateway_config() -> GatewayConfig:
         Platform.SLACK: "SLACK_BOT_TOKEN",
         Platform.MATTERMOST: "MATTERMOST_TOKEN",
         Platform.MATRIX: "MATRIX_ACCESS_TOKEN",
+        Platform.ZULIP: "ZULIP_API_KEY",
     }
     for platform, pconfig in config.platforms.items():
         if not pconfig.enabled:
@@ -802,6 +807,37 @@ def _apply_env_overrides(config: GatewayConfig) -> None:
                 pass
         if webhook_secret:
             config.platforms[Platform.WEBHOOK].extra["secret"] = webhook_secret
+
+    # Zulip (uses email + API key + server URL auth)
+    zulip_api_key = os.getenv("ZULIP_API_KEY")
+    zulip_email = os.getenv("ZULIP_BOT_EMAIL")
+    zulip_site = os.getenv("ZULIP_SITE_URL")
+    if zulip_api_key:
+        if not zulip_email:
+            logger.warning("ZULIP_API_KEY set but ZULIP_BOT_EMAIL is missing")
+        if not zulip_site:
+            logger.warning("ZULIP_API_KEY set but ZULIP_SITE_URL is missing")
+        if Platform.ZULIP not in config.platforms:
+            config.platforms[Platform.ZULIP] = PlatformConfig()
+        config.platforms[Platform.ZULIP].enabled = True
+        config.platforms[Platform.ZULIP].token = zulip_api_key
+        config.platforms[Platform.ZULIP].extra.update({
+            "site_url": zulip_site or "",
+            "bot_email": zulip_email or "",
+        })
+        zulip_default_stream = os.getenv("ZULIP_DEFAULT_STREAM")
+        if zulip_default_stream:
+            config.platforms[Platform.ZULIP].extra["default_stream"] = zulip_default_stream
+        zulip_home_topic = os.getenv("ZULIP_HOME_TOPIC")
+        if zulip_home_topic:
+            config.platforms[Platform.ZULIP].extra["home_topic"] = zulip_home_topic
+        zulip_home = os.getenv("ZULIP_HOME_CHANNEL")
+        if zulip_home:
+            config.platforms[Platform.ZULIP].home_channel = HomeChannel(
+                platform=Platform.ZULIP,
+                chat_id=zulip_home,
+                name=os.getenv("ZULIP_HOME_CHANNEL_NAME", "Home"),
+            )
 
     # Session settings
     idle_minutes = os.getenv("SESSION_IDLE_MINUTES")

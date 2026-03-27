@@ -223,6 +223,16 @@ PLATFORM_HINTS = {
         "only — no markdown, no formatting. SMS messages are limited to ~1600 "
         "characters, so be brief and direct."
     ),
+    "zulip": (
+        "You are in a Zulip organization communicating with your user. "
+        "Zulip renders Markdown (bold, italic, code blocks, headings, lists, links). "
+        "Messages may arrive in a stream (topic-based channel) or as a direct message. "
+        "In streams, keep replies focused on the topic. "
+        "You can send media files natively: include MEDIA:/absolute/path/to/file "
+        "in your response. Images (.png, .jpg, .webp) are uploaded as image "
+        "attachments, other files as downloadable documents. You can also include "
+        "image URLs in markdown format ![alt](url) and they will be rendered inline."
+    ),
 }
 
 CONTEXT_FILE_MAX_CHARS = 20_000

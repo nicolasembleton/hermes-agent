@@ -77,6 +77,18 @@ _DB_CONNSTR_RE = re.compile(
     re.IGNORECASE,
 )
 
+# HTTP(S) URLs with embedded basic-auth credentials: https://user:PASSWORD@host
+# General defense-in-depth for any HTTP-based service that puts credentials
+# in the URL (e.g. Zulip's Python client uses email:api_key as HTTP basic
+# auth).  Catches the password portion only; the username (typically an
+# email or service name) is left visible for debuggability.
+# Matches only within the authority section (before the first /) so normal
+# query-string parameters like ?q=hello@world are not false-positive'd.
+_HTTPS_CREDENTIALS_RE = re.compile(
+    r"(https?://[^/\s]+:[^@\s]+)(@)",
+    re.IGNORECASE,
+)
+
 # E.164 phone numbers: +<country><number>, 7-15 digits
 # Negative lookahead prevents matching hex strings or identifiers
 _SIGNAL_PHONE_RE = re.compile(r"(\+[1-9]\d{6,14})(?![A-Za-z0-9])")
@@ -142,6 +154,12 @@ def redact_sensitive_text(text: str) -> str:
 
     # Database connection string passwords
     text = _DB_CONNSTR_RE.sub(lambda m: f"{m.group(1)}***{m.group(3)}", text)
+
+    # HTTP(S) basic-auth credential URLs (e.g. Zulip client error messages
+    # that embed email:api_key in the request URL)
+    text = _HTTPS_CREDENTIALS_RE.sub(
+        lambda m: f"{m.group(1).rsplit(':', 1)[0]}:***{m.group(2)}", text,
+    )
 
     # E.164 phone numbers (Signal, WhatsApp)
     def _redact_phone(m):

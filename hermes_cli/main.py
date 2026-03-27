@@ -3386,7 +3386,7 @@ For more help on a command:
     cron_create.add_argument("schedule", help="Schedule like '30m', 'every 2h', or '0 9 * * *'")
     cron_create.add_argument("prompt", nargs="?", help="Optional self-contained prompt or task instruction")
     cron_create.add_argument("--name", help="Optional human-friendly job name")
-    cron_create.add_argument("--deliver", help="Delivery target: origin, local, telegram, discord, signal, or platform:chat_id")
+    cron_create.add_argument("--deliver", help="Delivery target: origin, local, telegram, discord, signal, zulip, or platform:chat_id")
     cron_create.add_argument("--repeat", type=int, help="Optional repeat count")
     cron_create.add_argument("--skill", dest="skills", action="append", help="Attach a skill. Repeat to add multiple skills.")
 
@@ -3996,7 +3996,7 @@ For more help on a command:
             msgs = db.message_count()
             print(f"Total sessions: {total}")
             print(f"Total messages: {msgs}")
-            for src in ["cli", "telegram", "discord", "whatsapp", "slack"]:
+            for src in ["cli", "telegram", "discord", "whatsapp", "slack", "signal", "zulip"]:
                 c = db.session_count(source=src)
                 if c > 0:
                     print(f"  {src}: {c} sessions")

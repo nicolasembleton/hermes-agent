@@ -20,6 +20,7 @@ def _clear_auth_env(monkeypatch) -> None:
         "MATTERMOST_ALLOWED_USERS",
         "MATRIX_ALLOWED_USERS",
         "DINGTALK_ALLOWED_USERS",
+        "ZULIP_ALLOWED_USERS",
         "GATEWAY_ALLOWED_USERS",
         "TELEGRAM_ALLOW_ALL_USERS",
         "DISCORD_ALLOW_ALL_USERS",
@@ -31,6 +32,7 @@ def _clear_auth_env(monkeypatch) -> None:
         "MATTERMOST_ALLOW_ALL_USERS",
         "MATRIX_ALLOW_ALL_USERS",
         "DINGTALK_ALLOW_ALL_USERS",
+        "ZULIP_ALLOW_ALL_USERS",
         "GATEWAY_ALLOW_ALL_USERS",
     ):
         monkeypatch.delenv(key, raising=False)
@@ -135,3 +137,31 @@ async def test_global_ignore_suppresses_pairing_reply(monkeypatch):
     assert result is None
     runner.pairing_store.generate_code.assert_not_called()
     adapter.send.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_unauthorized_zulip_dm_pairs_by_default(monkeypatch):
+    """Zulip DM from an unknown user should trigger the pairing flow."""
+    _clear_auth_env(monkeypatch)
+    config = GatewayConfig(
+        platforms={Platform.ZULIP: PlatformConfig(enabled=True, token="***")},
+    )
+    runner, adapter = _make_runner(Platform.ZULIP, config)
+    runner.pairing_store.generate_code.return_value = "ZULIP99XY"
+
+    result = await runner._handle_message(
+        _make_event(
+            Platform.ZULIP,
+            "alice@example.com",
+            "dm:alice@example.com",
+        )
+    )
+
+    assert result is None
+    runner.pairing_store.generate_code.assert_called_once_with(
+        "zulip",
+        "alice@example.com",
+        "tester",
+    )
+    adapter.send.assert_awaited_once()
+    assert "ZULIP99XY" in adapter.send.await_args.args[1]

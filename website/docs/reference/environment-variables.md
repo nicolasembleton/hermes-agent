@@ -206,6 +206,16 @@ For native Anthropic auth, Hermes prefers Claude Code's own credential files whe
 | `MATRIX_ALLOWED_USERS` | Comma-separated Matrix user IDs allowed to message the bot (e.g. `@alice:matrix.org`) |
 | `MATRIX_HOME_ROOM` | Room ID for proactive message delivery (e.g. `!abc123:matrix.org`) |
 | `MATRIX_ENCRYPTION` | Enable end-to-end encryption (`true`/`false`, default: `false`) |
+| `ZULIP_SITE_URL` | Zulip server URL (e.g. `https://your-org.zulipchat.com` or self-hosted) |
+| `ZULIP_BOT_EMAIL` | Zulip bot email address (from bot settings) |
+| `ZULIP_API_KEY` | Zulip bot API key (from bot settings) |
+| `ZULIP_ALLOWED_USERS` | Comma-separated email addresses allowed to interact with the bot |
+| `ZULIP_ALLOW_ALL_USERS` | Allow all Zulip users without an allowlist (`true`/`false`) |
+| `ZULIP_DEFAULT_STREAM` | Default stream name for outbound messages |
+| `ZULIP_HOME_TOPIC` | Default topic for cron/notification delivery |
+| `ZULIP_HOME_CHANNEL` | Home `stream:topic` or `dm:email` for cron/notification delivery |
+| `ZULIP_REQUIRE_MENTION` | Require @mention in streams to trigger the bot (`true`/`false`, default: `true`) |
+| `ZULIP_FREE_RESPONSE_STREAMS` | Comma-separated stream names or IDs where @mention is not required |
 | `HASS_TOKEN` | Home Assistant Long-Lived Access Token (enables HA platform + tools) |
 | `HASS_URL` | Home Assistant URL (default: `http://homeassistant.local:8123`) |
 | `WEBHOOK_ENABLED` | Enable the webhook platform adapter (`true`/`false`) |
