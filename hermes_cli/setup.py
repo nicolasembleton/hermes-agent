@@ -2216,6 +2216,54 @@ def setup_gateway(config: dict):
             if home_channel:
                 save_env_value("MATTERMOST_HOME_CHANNEL", home_channel)
 
+    # ── Zulip ──
+    existing_zulip = get_env_value("ZULIP_API_KEY")
+    if existing_zulip:
+        print_info("Zulip: already configured")
+        if prompt_yes_no("Reconfigure Zulip?", False):
+            existing_zulip = None
+
+    if not existing_zulip and prompt_yes_no("Set up Zulip?", False):
+        print_info("Works with any Zulip server (cloud at zulipchat.com or self-hosted).")
+        print_info("   1. In Zulip: Settings → Your bots → Add a new bot")
+        print_info("   2. Choose 'Generic bot' and copy the email + API key")
+        print()
+        site_url = prompt("Zulip server URL (e.g. https://your-org.zulipchat.com)")
+        if site_url:
+            save_env_value("ZULIP_SITE_URL", site_url.rstrip("/"))
+        bot_email = prompt("Bot email address")
+        if bot_email:
+            save_env_value("ZULIP_BOT_EMAIL", bot_email)
+        api_key = prompt("Bot API key", password=True)
+        if api_key:
+            save_env_value("ZULIP_API_KEY", api_key)
+            print_success("Zulip credentials saved")
+
+            # Allowed users
+            print()
+            print_info("🔒 Security: Restrict who can use your bot")
+            print_info("   Zulip user emails are the same as their login email")
+            print()
+            allowed_users = prompt(
+                "Allowed user emails (comma-separated, leave empty for open access)"
+            )
+            if allowed_users:
+                save_env_value("ZULIP_ALLOWED_USERS", allowed_users.replace(" ", ""))
+                print_success("Zulip allowlist configured")
+            else:
+                print_info(
+                    "⚠️  No allowlist set - anyone who can message the bot can use it!"
+                )
+
+            # Home channel
+            print()
+            print_info("📬 Home Channel: where Hermes delivers cron job results and notifications.")
+            print_info("   Format: stream_name:topic (e.g. general:notifications)")
+            print_info("   You can also set this later by typing /set-home in Zulip.")
+            home_channel = prompt("Home channel stream:topic (leave empty to set later with /set-home)")
+            if home_channel:
+                save_env_value("ZULIP_HOME_CHANNEL", home_channel)
+
     # ── WhatsApp ──
     existing_whatsapp = get_env_value("WHATSAPP_ENABLED")
     if not existing_whatsapp and prompt_yes_no("Set up WhatsApp?", False):
@@ -2292,6 +2340,7 @@ def setup_gateway(config: dict):
         or get_env_value("MATTERMOST_TOKEN")
         or get_env_value("MATRIX_ACCESS_TOKEN")
         or get_env_value("MATRIX_PASSWORD")
+        or get_env_value("ZULIP_API_KEY")
         or get_env_value("WHATSAPP_ENABLED")
         or get_env_value("WEBHOOK_ENABLED")
     )
@@ -2312,6 +2361,8 @@ def setup_gateway(config: dict):
             missing_home.append("Discord")
         if get_env_value("SLACK_BOT_TOKEN") and not get_env_value("SLACK_HOME_CHANNEL"):
             missing_home.append("Slack")
+        if get_env_value("ZULIP_API_KEY") and not get_env_value("ZULIP_HOME_CHANNEL"):
+            missing_home.append("Zulip")
 
         if missing_home:
             print()

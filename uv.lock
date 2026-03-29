@@ -1649,7 +1649,6 @@ all = [
     { name = "slack-bolt" },
     { name = "slack-sdk" },
     { name = "sounddevice" },
-    { name = "swe-rex", extra = ["modal"] },
     { name = "zulip" },
 ]
 cli = [
