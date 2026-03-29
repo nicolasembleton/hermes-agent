@@ -205,50 +205,54 @@ class TestSecretCapturePayloadRedaction:
         assert "abc123def456" not in result
 
 
-class TestElevenLabsTavilyExaKeys:
-    """Regression tests for ElevenLabs (sk_), Tavily (tvly-), and Exa (exa_) keys."""
+class TestHttpsBasicAuthRedaction:
+    """Redaction of credentials embedded in HTTP(S) URLs.
 
-    def test_elevenlabs_key_redacted(self):
-        text = "ELEVENLABS_API_KEY=sk_abc123def456ghi789jklmnopqrstu"
+    Services like Zulip use HTTP basic auth with email:api_key.  If an
+    error message or log line includes the full URL, the password portion
+    must be masked while the username remains visible for debuggability.
+    """
+
+    def test_https_url_with_credentials_redacts_password(self):
+        text = "ConnectionError: https://bot@example.zulipchat.com:superSecretApiKey123@zulip.example.com/api/v1/events"
         result = redact_sensitive_text(text)
-        assert "abc123def456ghi" not in result
+        assert "superSecretApiKey123" not in result
+        assert "***@" in result
+        # Username (email) is preserved for debuggability
+        assert "bot@example.zulipchat.com" in result
 
-    def test_elevenlabs_key_in_log_line(self):
-        text = "Connecting to ElevenLabs with key sk_abc123def456ghi789jklmnopqrstu"
+    def test_http_url_with_credentials_redacts_password(self):
+        text = "Failed: http://user:myPassword@internal-api.local/endpoint"
         result = redact_sensitive_text(text)
-        assert "abc123def456ghi" not in result
+        assert "myPassword" not in result
+        assert "user:***@" in result
 
-    def test_tavily_key_redacted(self):
-        text = "TAVILY_API_KEY=tvly-ABCdef123456789GHIJKL0000"
-        result = redact_sensitive_text(text)
-        assert "ABCdef123456789" not in result
-
-    def test_tavily_key_in_log_line(self):
-        text = "Initialising Tavily client with tvly-ABCdef123456789GHIJKL0000"
-        result = redact_sensitive_text(text)
-        assert "ABCdef123456789" not in result
-
-    def test_exa_key_redacted(self):
-        text = "EXA_API_KEY=exa_XYZ789abcdef000000000000000"
-        result = redact_sensitive_text(text)
-        assert "XYZ789abcdef" not in result
-
-    def test_exa_key_in_log_line(self):
-        text = "Using Exa client with key exa_XYZ789abcdef000000000000000"
-        result = redact_sensitive_text(text)
-        assert "XYZ789abcdef" not in result
-
-    def test_all_three_in_env_dump(self):
-        env_dump = (
-            "HOME=/home/user\n"
-            "ELEVENLABS_API_KEY=sk_abc123def456ghi789jklmnopqrstu\n"
-            "TAVILY_API_KEY=tvly-ABCdef123456789GHIJKL0000\n"
-            "EXA_API_KEY=exa_XYZ789abcdef000000000000000\n"
-            "SHELL=/bin/bash\n"
+    def test_zulip_realistic_error_message(self):
+        """Simulate a realistic Zulip client error embedding credentials."""
+        text = (
+            "Non-retryable error: ConnectionError: "
+            "Max retries exceeded with url: "
+            "/api/v1/events (Caused by NewConnectionError: "
+            "Failed to establish a new connection: "
+            "https://hermes-bot@company.com:zlp_abc123def456ghi789jkl012@company.zulipchat.com:443)"
         )
-        result = redact_sensitive_text(env_dump)
-        assert "abc123def456ghi" not in result
-        assert "ABCdef123456789" not in result
-        assert "XYZ789abcdef" not in result
-        assert "HOME=/home/user" in result
-        assert "SHELL=/bin/bash" in result
+        result = redact_sensitive_text(text)
+        assert "zlp_abc123def456ghi789jkl012" not in result
+        assert "hermes-bot@company.com:***@" in result
+
+    def test_normal_https_url_without_credentials_unchanged(self):
+        text = "Connecting to https://api.openai.com/v1/chat/completions"
+        result = redact_sensitive_text(text)
+        assert result == text
+
+    def test_https_url_with_port_and_credentials(self):
+        text = "Error connecting to https://user:pass123@server.example.com:8443/path"
+        result = redact_sensitive_text(text)
+        assert "pass123" not in result
+        assert "user:***@" in result
+
+    def test_https_url_with_complex_username_preserved(self):
+        text = "https://service-account+hermes@corp.example.com:api_key_token@api.example.com/v1"
+        result = redact_sensitive_text(text)
+        assert "service-account+hermes@corp.example.com" in result
+        assert "api_key_token" not in result

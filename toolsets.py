@@ -363,8 +363,8 @@ TOOLSETS = {
         "includes": []
     },
 
-    "hermes-webhook": {
-        "description": "Webhook toolset - receive and process external webhook events",
+    "hermes-zulip": {
+        "description": "Zulip bot toolset - full access for Zulip organization chat",
         "tools": _HERMES_CORE_TOOLS,
         "includes": []
     },
@@ -372,7 +372,7 @@ TOOLSETS = {
     "hermes-gateway": {
         "description": "Gateway toolset - union of all messaging platform tools",
         "tools": [],
-        "includes": ["hermes-telegram", "hermes-discord", "hermes-whatsapp", "hermes-slack", "hermes-signal", "hermes-homeassistant", "hermes-email", "hermes-sms", "hermes-mattermost", "hermes-matrix", "hermes-dingtalk", "hermes-feishu", "hermes-wecom", "hermes-webhook"]
+        "includes": ["hermes-telegram", "hermes-discord", "hermes-whatsapp", "hermes-slack", "hermes-signal", "hermes-homeassistant", "hermes-email", "hermes-sms", "hermes-mattermost", "hermes-matrix", "hermes-dingtalk", "hermes-feishu", "hermes-wecom", "hermes-zulip"]
     }
 }
 

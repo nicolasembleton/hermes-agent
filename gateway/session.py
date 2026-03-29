@@ -193,10 +193,12 @@ _PII_SAFE_PLATFORMS = frozenset({
     Platform.WHATSAPP,
     Platform.SIGNAL,
     Platform.TELEGRAM,
+    Platform.ZULIP,
 })
 """Platforms where user IDs can be safely redacted (no in-message mention system
-that requires raw IDs).  Discord is excluded because mentions use ``<@user_id>``
-and the LLM needs the real ID to tag users."""
+that requires raw IDs).  Discord and Slack are excluded because their mention
+syntax may require the real user ID.  Zulip uses ``@**Name**`` markdown so
+raw email user-IDs are not needed for mentions."""
 
 
 def build_session_context_prompt(

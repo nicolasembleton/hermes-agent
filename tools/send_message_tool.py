@@ -1,8 +1,9 @@
 """Send Message Tool -- cross-channel messaging via platform APIs.
 
 Sends a message to a user or channel on any connected messaging platform
-(Telegram, Discord, Slack). Supports listing available targets and resolving
-human-friendly channel names to IDs. Works in both CLI and gateway contexts.
+(Telegram, Discord, Slack, Zulip, etc.). Supports listing available targets
+and resolving human-friendly channel names to IDs. Works in both CLI and
+gateway contexts.
 """
 
 import json
@@ -16,6 +17,17 @@ logger = logging.getLogger(__name__)
 
 _TELEGRAM_TOPIC_TARGET_RE = re.compile(r"^\s*(-?\d+)(?::(\d+))?\s*$")
 _FEISHU_TARGET_RE = re.compile(r"^\s*((?:oc|ou|on|chat|open)_[-A-Za-z0-9]+)(?::([-A-Za-z0-9_]+))?\s*$")
+
+# Zulip target patterns:
+#   dm:email@example.com           → DM
+#   group_dm:email1,email2         → group DM
+#   stream_id:topic                → stream (numeric ID before colon)
+#   email@example.com              → implicit DM (fallback)
+_ZULIP_DM_RE = re.compile(r"^dm:([^@]+@[^@]+)$", re.IGNORECASE)
+_ZULIP_GROUP_DM_RE = re.compile(
+    r"^group_dm:([^@]+@[^@]+(?:,[^@]+@[^@]+)*)$", re.IGNORECASE
+)
+_ZULIP_STREAM_RE = re.compile(r"^(\d+):(.+)$")
 _IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".gif"}
 _VIDEO_EXTS = {".mp4", ".mov", ".avi", ".mkv", ".3gp"}
 _AUDIO_EXTS = {".ogg", ".opus", ".mp3", ".wav", ".m4a"}
@@ -42,7 +54,7 @@ SEND_MESSAGE_SCHEMA = {
             },
             "target": {
                 "type": "string",
-                "description": "Delivery target. Format: 'platform' (uses home channel), 'platform:#channel-name', 'platform:chat_id', or Telegram topic 'telegram:chat_id:thread_id'. Examples: 'telegram', 'telegram:-1001234567890:17585', 'discord:#bot-home', 'slack:#engineering', 'signal:+15551234567'"
+                "description": "Delivery target. Format: 'platform' (uses home channel), 'platform:#channel-name', 'platform:chat_id', or Telegram topic 'telegram:chat_id:thread_id'. Examples: 'telegram', 'telegram:-1001234567890:17585', 'discord:#bot-home', 'slack:#engineering', 'signal:+15551234567', 'zulip', 'zulip:123:General (stream_id:topic)', 'zulip:dm:user@example.com', 'zulip:group_dm:a@b.com,c@d.com'"
             },
             "message": {
                 "type": "string",
@@ -133,6 +145,7 @@ def _handle_send(args):
         "wecom": Platform.WECOM,
         "email": Platform.EMAIL,
         "sms": Platform.SMS,
+        "zulip": Platform.ZULIP,
     }
     platform = platform_map.get(platform_name)
     if not platform:
@@ -196,7 +209,13 @@ def _handle_send(args):
 
 
 def _parse_target_ref(platform_name: str, target_ref: str):
-    """Parse a tool target into chat_id/thread_id and whether it is explicit."""
+    """Parse a tool target into chat_id/thread_id and whether it is explicit.
+
+    Returns ``(chat_id, thread_id, is_explicit)``.  For Zulip, *chat_id*
+    follows the adapter's canonical format (``stream_id:topic``,
+    ``dm:email``, ``group_dm:emails``) so the standalone sender can
+    reuse the adapter's parsing helpers without duplicating string logic.
+    """
     if platform_name == "telegram":
         match = _TELEGRAM_TOPIC_TARGET_RE.fullmatch(target_ref)
         if match:
@@ -205,8 +224,49 @@ def _parse_target_ref(platform_name: str, target_ref: str):
         match = _FEISHU_TARGET_RE.fullmatch(target_ref)
         if match:
             return match.group(1), match.group(2), True
+
+    # Zulip: reuse adapter chat-id formats.
+    if platform_name == "zulip":
+        return _parse_zulip_target_ref(target_ref)
+
+    # Generic: all-numeric (with optional leading minus).
     if target_ref.lstrip("-").isdigit():
         return target_ref, None, True
+    return None, None, False
+
+
+def _parse_zulip_target_ref(target_ref: str):
+    """Parse a Zulip target reference into ``(chat_id, thread_id, is_explicit)``.
+
+    Accepted formats (matching the adapter's chat-id conventions):
+
+    * ``dm:email@example.com``          → DM chat ID
+    * ``group_dm:a@b.com,c@d.com``      → group DM chat ID
+    * ``stream_id:topic text``          → stream chat ID (numeric ID)
+    * ``email@example.com``             → implicit DM
+
+    Anything else is treated as non-explicit (will go through the
+    channel-directory resolver or fail with a helpful error).
+    """
+    # Explicit DM
+    m = _ZULIP_DM_RE.fullmatch(target_ref)
+    if m:
+        return f"dm:{m.group(1)}", None, True
+
+    # Explicit group DM
+    m = _ZULIP_GROUP_DM_RE.fullmatch(target_ref)
+    if m:
+        return f"group_dm:{m.group(1)}", None, True
+
+    # Stream: "numeric_id:topic" — matches adapter's _build_stream_chat_id format
+    m = _ZULIP_STREAM_RE.fullmatch(target_ref)
+    if m:
+        return f"{m.group(1)}:{m.group(2)}", None, True
+
+    # Implicit DM: bare email address
+    if re.match(r"^[^@\s]+@[^@\s]+$", target_ref):
+        return f"dm:{target_ref}", None, True
+
     return None, None, False
 
 
@@ -286,6 +346,7 @@ async def _send_to_platform(platform, pconfig, chat_id, message, thread_id=None,
     from gateway.platforms.telegram import TelegramAdapter
     from gateway.platforms.discord import DiscordAdapter
     from gateway.platforms.slack import SlackAdapter
+    from gateway.platforms.zulip import MAX_MESSAGE_LENGTH as ZULIP_MAX_MESSAGE_LENGTH
 
     # Feishu adapter import is optional (requires lark-oapi)
     try:
@@ -301,6 +362,7 @@ async def _send_to_platform(platform, pconfig, chat_id, message, thread_id=None,
         Platform.TELEGRAM: TelegramAdapter.MAX_MESSAGE_LENGTH,
         Platform.DISCORD: DiscordAdapter.MAX_MESSAGE_LENGTH,
         Platform.SLACK: SlackAdapter.MAX_MESSAGE_LENGTH,
+        Platform.ZULIP: ZULIP_MAX_MESSAGE_LENGTH,
     }
     if _feishu_available:
         _MAX_LENGTHS[Platform.FEISHU] = FeishuAdapter.MAX_MESSAGE_LENGTH
@@ -371,6 +433,8 @@ async def _send_to_platform(platform, pconfig, chat_id, message, thread_id=None,
             result = await _send_feishu(pconfig, chat_id, chunk, thread_id=thread_id)
         elif platform == Platform.WECOM:
             result = await _send_wecom(pconfig.extra, chat_id, chunk)
+        elif platform == Platform.ZULIP:
+            result = await _send_zulip(pconfig, chat_id, chunk)
         else:
             result = {"error": f"Direct sending not yet implemented for {platform.value}"}
 
@@ -879,6 +943,137 @@ async def _send_feishu(pconfig, chat_id, message, media_files=None, thread_id=No
         }
     except Exception as e:
         return {"error": f"Feishu send failed: {e}"}
+
+
+async def _send_zulip(pconfig, chat_id: str, message: str):
+    """Send a message via the Zulip REST API (standalone, no adapter needed).
+
+    Creates a one-shot Zulip client from *pconfig* (which holds the API key
+    in ``token`` and ``site_url`` / ``bot_email`` in ``extra``).  Parses
+    the *chat_id* using the adapter's helpers so that stream messages,
+    DMs, and group DMs are all handled identically to the live gateway.
+
+    Parameters
+    ----------
+    pconfig : PlatformConfig
+        Platform configuration with ``token`` (API key) and
+        ``extra["site_url"]``, ``extra["bot_email"]``.
+    chat_id : str
+        Canonical chat ID in the adapter's format:
+        ``"{stream_id}:{topic}"``, ``"dm:{email}"``, or
+        ``"group_dm:{emails}"``.
+    message : str
+        Plain text or markdown to send.
+    """
+    try:
+        import zulip
+    except ImportError:
+        return {"error": "zulip package not installed. Run: pip install zulip"}
+
+    site_url = (pconfig.extra.get("site_url") or "").rstrip("/")
+    bot_email = pconfig.extra.get("bot_email", "")
+    api_key = pconfig.token or ""
+    cert_bundle = os.getenv("ZULIP_CERT_BUNDLE", "") or None
+    insecure = os.getenv("ZULIP_ALLOW_INSECURE", "false").lower() in ("true", "1", "yes")
+
+    if not site_url or not bot_email or not api_key:
+        return {
+            "error": (
+                "Zulip not fully configured (ZULIP_SITE_URL, ZULIP_BOT_EMAIL, "
+                "ZULIP_API_KEY required)"
+            )
+        }
+
+    # Reuse the adapter's chat-id parsing helpers to build the correct
+    # request payload — avoids duplicating string-splitting logic.
+    try:
+        from gateway.platforms.zulip import (
+            _parse_stream_chat_id,
+            _parse_dm_chat_id,
+            _parse_group_dm_chat_id,
+        )
+    except ImportError as exc:
+        return {"error": f"Failed to import Zulip adapter helpers: {exc}"}
+
+    client_kwargs = {
+        "site": site_url,
+        "email": bot_email,
+        "api_key": api_key,
+    }
+    if cert_bundle:
+        client_kwargs["cert_bundle"] = cert_bundle
+    if insecure:
+        client_kwargs["insecure"] = True
+    client = zulip.Client(**client_kwargs)
+
+    # Determine message type from chat_id.
+    parsed_stream = _parse_stream_chat_id(chat_id)
+    if parsed_stream:
+        stream_id, topic = parsed_stream
+        request = {
+            "type": "stream",
+            "to": str(stream_id),
+            "topic": topic,
+            "content": message,
+        }
+    else:
+        from gateway.platforms.zulip import _parse_stream_name_topic
+
+        named_stream = _parse_stream_name_topic(chat_id)
+        if named_stream:
+            stream_name, topic = named_stream
+            stream_result = client.get_stream_id(stream_name)
+            if stream_result.get("result") != "success":
+                return {"error": f"Zulip API error: {stream_result.get('msg', 'unknown')}"}
+            stream_id = stream_result.get("stream_id")
+            if stream_id is None:
+                return {"error": f"Zulip API error: Stream '{stream_name}' not found"}
+            request = {
+                "type": "stream",
+                "to": str(stream_id),
+                "topic": topic,
+                "content": message,
+            }
+        else:
+            dm_email = _parse_dm_chat_id(chat_id)
+            if dm_email:
+                request = {
+                    "type": "private",
+                    "to": [dm_email],
+                    "content": message,
+                }
+            else:
+                group_emails = _parse_group_dm_chat_id(chat_id)
+                if group_emails:
+                    request = {
+                        "type": "private",
+                        "to": group_emails,
+                        "content": message,
+                    }
+                else:
+                    # Fallback: treat the entire chat_id as a single email.
+                    request = {
+                        "type": "private",
+                        "to": [chat_id],
+                        "content": message,
+                    }
+
+    try:
+        result = client.send_message(request)
+        if result.get("result") == "success":
+            msg_id = result.get("id")
+            return {
+                "success": True,
+                "platform": "zulip",
+                "chat_id": chat_id,
+                "message_id": str(msg_id) if msg_id is not None else None,
+            }
+        return {
+            "error": f"Zulip API error: {result.get('msg', 'unknown')}"
+        }
+    except Exception as e:
+        logger.error("Zulip: send_message failed in standalone sender — %s", e)
+        return {"error": f"Zulip send failed: {e}"}
 
 
 def _check_send_message():

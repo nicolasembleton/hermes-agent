@@ -31,11 +31,19 @@ def _session_entry_id(origin: Dict[str, Any]) -> Optional[str]:
 def _session_entry_name(origin: Dict[str, Any]) -> str:
     base_name = origin.get("chat_name") or origin.get("user_name") or str(origin.get("chat_id"))
     thread_id = origin.get("thread_id")
-    if not thread_id:
-        return base_name
+    if thread_id:
+        topic_label = origin.get("chat_topic") or f"topic {thread_id}"
+        return f"{base_name} / {topic_label}"
 
-    topic_label = origin.get("chat_topic") or f"topic {thread_id}"
-    return f"{base_name} / {topic_label}"
+    # For stream/channel sessions (e.g. Zulip), show "stream / topic" when
+    # the topic differs from the base (stream) name.  This mirrors the
+    # Telegram topic display pattern.
+    chat_topic = origin.get("chat_topic")
+    chat_type = origin.get("chat_type")
+    if chat_topic and chat_topic != base_name and chat_type in ("stream", "channel"):
+        return f"{base_name} / {chat_topic}"
+
+    return base_name
 
 
 # ---------------------------------------------------------------------------
@@ -62,7 +70,7 @@ def build_channel_directory(adapters: Dict[Any, Any]) -> Dict[str, Any]:
             logger.warning("Channel directory: failed to build %s: %s", platform.value, e)
 
     # Telegram, WhatsApp & Signal can't enumerate chats -- pull from session history
-    for plat_name in ("telegram", "whatsapp", "signal", "email", "sms"):
+    for plat_name in ("telegram", "whatsapp", "signal", "email", "sms", "zulip"):
         if plat_name not in platforms:
             platforms[plat_name] = _build_from_sessions(plat_name)
 
