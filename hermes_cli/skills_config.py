@@ -30,7 +30,7 @@ PLATFORMS = {
     "dingtalk": "💬 DingTalk",
     "feishu": "🪽 Feishu",
     "wecom": "💬 WeCom",
-    "webhook": "🔗 Webhook",
+    "zulip": "💬 Zulip",
 }
 
 # ─── Config Helpers ───────────────────────────────────────────────────────────

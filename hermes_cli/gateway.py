@@ -1351,7 +1351,6 @@ _PLATFORMS = [
         ],
     },
     {
-    {
         "key": "feishu",
         "label": "Feishu / Lark",
         "emoji": "🪽",
