@@ -78,6 +78,10 @@ class DeliveryTarget:
             thread_id = parts[2] if len(parts) > 2 else None
             try:
                 platform = Platform(platform_str)
+                # Zulip uses stream:topic as chat_id (topic is not a thread)
+                if platform == Platform.ZULIP and thread_id:
+                    chat_id = f"{chat_id}:{thread_id}"
+                    thread_id = None
                 return cls(platform=platform, chat_id=chat_id, thread_id=thread_id, is_explicit=True)
             except ValueError:
                 # Unknown platform, treat as local
