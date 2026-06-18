@@ -152,6 +152,11 @@ ZULIP_DEFAULT_STREAM=general
 
 # Streams where @mention is not required (comma-separated names or IDs)
 # ZULIP_FREE_RESPONSE_STREAMS=bot-commands,42
+
+# Missed-message catch-up — back-fill messages that arrived while the gateway
+# was down (default: off). See "Missed-Message Catch-Up" below.
+# ZULIP_CATCHUP=true
+# ZULIP_CATCHUP_MAX_MESSAGES=100   # per-stream replay cap per (re-)register
 ```
 
 Optional behavior settings in `~/.hermes/config.yaml`:
@@ -208,6 +213,47 @@ ZULIP_HOME_TOPIC=notifications
 ```
 
 `ZULIP_HOME_CHANNEL` takes precedence when both forms are set.
+
+## Missed-Message Catch-Up
+
+The Zulip events API only delivers events from the moment the gateway registers
+its event queue onward. If the gateway is down — a restart, a `BAD_EVENT_QUEUE_ID`
+expiry after a long idle, or a network drop — any messages that arrive during the
+gap are never delivered, and the bot silently never sees them.
+
+Catch-up closes that gap. When enabled, on every (re-)register the adapter
+back-fills each stream from a persisted per-stream watermark and feeds the missed
+messages through the **same path live messages take** — so dedup, mention-gating,
+and per-topic sessions all behave identically to messages received in real time.
+
+It is **off by default**: enabling it on a bot that has been offline for a while
+replays the accumulated backlog (up to the per-stream cap), which is usually
+surprising. Turn it on deliberately.
+
+```bash
+ZULIP_CATCHUP=true                 # opt in (default: false)
+ZULIP_CATCHUP_MAX_MESSAGES=100     # per-stream replay cap per (re-)register
+```
+
+Or in `~/.hermes/config.yaml` under the Zulip platform's `extra`:
+
+```yaml
+catchup_enabled: true
+catchup_max_messages: 100
+```
+
+Behavior details:
+
+- **First run never floods.** The first time catch-up sees a stream (no stored
+  watermark) it records the newest message id as a baseline and replays nothing —
+  a clean start does not drag in history.
+- **Bounded.** At most `catchup_max_messages` messages per stream are replayed per
+  (re-)register, so even a long downtime can't trigger an unbounded replay.
+- **Exactly-once in practice.** Replayed messages flow through the same dedup the
+  live queue uses, so a message caught by both the sweep and the live queue is
+  processed once.
+- **Forward-only.** The watermark only advances; it is persisted next to the bot's
+  state and survives restarts.
 
 ## Mention Gating
 

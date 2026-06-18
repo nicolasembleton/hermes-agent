@@ -58,6 +58,9 @@ _RECONNECT_BASE_DELAY = 2.0
 _RECONNECT_MAX_DELAY = 60.0
 _RECONNECT_JITTER = 0.2
 
+# Default per-stream cap for missed-message catch-up (see _run_missed_message_catchup).
+_CATCHUP_DEFAULT_MAX_MESSAGES = 100
+
 
 def _is_retryable_error(exc: Exception) -> bool:
     """Determine if a Zulip event queue error is worth retrying.
@@ -457,6 +460,42 @@ class ZulipAdapter(BasePlatformAdapter):
         self._context_depth: int = int(
             os.getenv("ZULIP_CONTEXT_DEPTH", "0")
         )
+
+        # Missed-message catch-up (opt-in, default OFF).
+        #
+        # The Zulip events API only delivers events from queue registration
+        # onward, so any message that arrives while the gateway is down
+        # (process restart, BAD_EVENT_QUEUE_ID expiry, network drop) is never
+        # seen by the bot.  When enabled, on every (re-)register the adapter
+        # back-fills the gap for each known stream from a persisted per-stream
+        # watermark and feeds the missed messages through the normal inbound
+        # path — so dedup (``_seen_events``), mention-gating, and dispatch all
+        # behave exactly as they do for live messages.
+        #
+        # Default OFF on purpose: enabling it on a bot that has been offline for
+        # a while replays the accumulated backlog (bounded by the per-stream
+        # cap), which is usually surprising.  Opt in deliberately.
+        self._catchup_enabled: bool = (
+            str(config.extra.get("catchup_enabled", "")).lower()
+            in ("true", "1", "yes")
+            or os.getenv("ZULIP_CATCHUP", "false").lower()
+            in ("true", "1", "yes")
+        )
+        # Per-stream cap on messages replayed per (re-)register — bounds the
+        # backlog a long downtime can produce.
+        try:
+            self._catchup_max_messages: int = max(
+                1,
+                int(
+                    config.extra.get("catchup_max_messages")
+                    or os.getenv(
+                        "ZULIP_CATCHUP_MAX_MESSAGES",
+                        str(_CATCHUP_DEFAULT_MAX_MESSAGES),
+                    )
+                ),
+            )
+        except (TypeError, ValueError):
+            self._catchup_max_messages = _CATCHUP_DEFAULT_MAX_MESSAGES
 
         # Background thread running the event queue.
         self._event_thread: Optional[threading.Thread] = None
@@ -1442,6 +1481,162 @@ class ZulipAdapter(BasePlatformAdapter):
     # Internal: event queue
     # ------------------------------------------------------------------
 
+    # ------------------------------------------------------------------
+    # Internal: missed-message catch-up (opt-in; see __init__)
+    # ------------------------------------------------------------------
+
+    def _catchup_watermark_path(self) -> Path:
+        """Path to the persisted per-stream catch-up watermark file.
+
+        Stored under HERMES_HOME so it survives restarts on the state volume;
+        falls back to beside this module in dev/test environments.
+        """
+        try:
+            from hermes_constants import get_hermes_home
+
+            return get_hermes_home() / "zulip_catchup_watermarks.json"
+        except Exception:
+            return Path(__file__).parent / "zulip_catchup_watermarks.json"
+
+    def _read_catchup_watermarks(self) -> Dict[str, int]:
+        """Load ``{stream_name: last_seen_msg_id}``; returns ``{}`` on any error."""
+        try:
+            data = json.loads(
+                self._catchup_watermark_path().read_text(encoding="utf-8")
+            )
+            if isinstance(data, dict):
+                return {
+                    str(k): int(v)
+                    for k, v in data.items()
+                    if isinstance(v, (int, float)) and int(v) > 0
+                }
+        except Exception:
+            pass
+        return {}
+
+    def _write_catchup_watermark(self, stream_name: str, msg_id: int) -> None:
+        """Persist a stream's watermark monotonically (never moves backward)."""
+        path = self._catchup_watermark_path()
+        try:
+            try:
+                existing = json.loads(path.read_text(encoding="utf-8"))
+                if not isinstance(existing, dict):
+                    existing = {}
+            except Exception:
+                existing = {}
+            if int(existing.get(stream_name, 0) or 0) >= msg_id:
+                return
+            existing[stream_name] = msg_id
+            tmp = path.with_suffix(".tmp")
+            tmp.write_text(json.dumps(existing), encoding="utf-8")
+            tmp.replace(path)
+        except Exception as exc:
+            logger.warning(
+                "Zulip: catch-up: failed to persist watermark for %r: %s",
+                stream_name, exc,
+            )
+
+    @staticmethod
+    def _stream_name_from_message(message: Dict[str, Any]) -> str:
+        """Lower-cased stream name from a stream message, else ``''``."""
+        recipient = message.get("display_recipient")
+        return recipient.lower() if isinstance(recipient, str) else ""
+
+    def _advance_catchup_watermark(self, message: Dict[str, Any]) -> None:
+        """Move a stream's watermark forward as messages flow (live or replayed).
+
+        Called from :meth:`_on_zulip_event` for every stream message so the next
+        (re-)register resumes from a current position instead of re-fetching
+        already-seen messages.  No-op when catch-up is disabled.
+        """
+        if not self._catchup_enabled:
+            return
+        if message.get("type") != "stream":
+            return
+        stream_name = self._stream_name_from_message(message)
+        msg_id = int(message.get("id", 0) or 0)
+        if stream_name and msg_id > 0:
+            self._write_catchup_watermark(stream_name, msg_id)
+
+    def _run_missed_message_catchup(self) -> None:
+        """Back-fill messages that arrived while the event queue was down.
+
+        Runs synchronously in the event-queue thread immediately before the
+        live queue (re-)registers.  For each known stream:
+
+        * **No stored watermark (first run):** record the newest message id as a
+          baseline and back-fill nothing — a clean start never replays history.
+        * **Stored watermark:** fetch up to ``catchup_max_messages`` messages
+          after it and feed each through :meth:`_on_zulip_event` — the same path
+          live events take, so ``_seen_events`` dedups any sweep/live overlap and
+          mention-gating still applies.
+
+        Best-effort: any per-stream error is logged and skipped so a transient
+        failure never blocks the queue from coming up.
+        """
+        if not self._client or not self._stream_id_cache:
+            return
+        if not self._loop or self._loop.is_closed():
+            return
+
+        watermarks = self._read_catchup_watermarks()
+        send_client = self._build_send_client()
+
+        for stream_name in sorted(self._stream_id_cache):
+            if self._closing:
+                return
+            watermark = watermarks.get(stream_name, 0)
+            try:
+                if watermark <= 0:
+                    # First run for this stream — seed to newest, no back-fill.
+                    result = send_client.get_messages({
+                        "anchor": "newest",
+                        "num_before": 1,
+                        "num_after": 0,
+                        "narrow": [["stream", stream_name]],
+                        "apply_markdown": False,
+                    })
+                    if result.get("result") == "success":
+                        msgs = result.get("messages", [])
+                        newest = msgs[-1].get("id", 0) if msgs else 0
+                        if newest > 0:
+                            self._write_catchup_watermark(stream_name, newest)
+                    continue
+
+                result = send_client.get_messages({
+                    "anchor": watermark + 1,
+                    "num_before": 0,
+                    "num_after": self._catchup_max_messages,
+                    "narrow": [["stream", stream_name]],
+                    "apply_markdown": False,
+                })
+            except Exception as exc:
+                logger.warning(
+                    "Zulip: catch-up: fetch failed for %r: %s", stream_name, exc
+                )
+                continue
+
+            if result.get("result") != "success":
+                continue
+
+            replayed = 0
+            for msg in result.get("messages", []):
+                if self._closing:
+                    return
+                if int(msg.get("id", 0) or 0) <= watermark:
+                    continue  # anchor is inclusive — skip the watermark itself
+                # Feed through the live event path: dedup, gating, dispatch, and
+                # watermark advance all happen there, identical to a live event.
+                self._on_zulip_event(
+                    {"type": "message", "op": "add", "message": msg}
+                )
+                replayed += 1
+            if replayed:
+                logger.info(
+                    "Zulip: catch-up: replayed %d missed message(s) on #%s",
+                    replayed, stream_name,
+                )
+
     def _run_event_queue(self) -> None:
         """Run the Zulip event queue in the current thread.
 
@@ -1457,6 +1652,13 @@ class ZulipAdapter(BasePlatformAdapter):
         self._consecutive_failures = 0
 
         while not self._closing:
+            # Back-fill messages missed while the queue was down (opt-in) before
+            # going live.  No-op unless catch-up is enabled; runs on every
+            # (re-)register so both boot and mid-run queue expiry are covered.
+            if self._catchup_enabled:
+                self._run_missed_message_catchup()
+                if self._closing:
+                    return
             try:
                 self._client.call_on_each_event(
                     self._on_zulip_event,
@@ -1557,6 +1759,10 @@ class ZulipAdapter(BasePlatformAdapter):
             return
         if msg_id:
             self._seen_events[msg_id] = time.time()
+
+        # Keep the catch-up watermark current as messages flow (no-op when
+        # catch-up is disabled), so the next (re-)register resumes from here.
+        self._advance_catchup_watermark(message)
 
         # Filter self-messages.
         sender_email = message.get("sender_email", "")

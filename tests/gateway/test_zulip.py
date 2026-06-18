@@ -817,6 +817,123 @@ class TestZulipInboundDispatch:
 
 
 # ---------------------------------------------------------------------------
+# Missed-message catch-up (opt-in gap recovery)
+# ---------------------------------------------------------------------------
+
+
+class _FakeLoop:
+    """Minimal stand-in for an asyncio loop in catch-up tests."""
+
+    def is_closed(self):
+        return False
+
+
+class TestZulipMissedMessageCatchup:
+    def _adapter(self, tmp_path, *, enabled=True, max_messages=100):
+        adapter = _make_adapter(bot_email="bot@example.zulipchat.com")
+        adapter._catchup_enabled = enabled
+        adapter._catchup_max_messages = max_messages
+        adapter._bot_user_id = 42
+        adapter._client = object()
+        adapter._loop = _FakeLoop()
+        adapter._stream_id_cache = {"bugs": 1}
+        wm = tmp_path / "wm.json"  # isolate the watermark file to tmp
+        adapter._catchup_watermark_path = lambda: wm
+        return adapter, wm
+
+    def _send_client(self, adapter, get_messages_return):
+        client = MagicMock()
+        client.get_messages.return_value = get_messages_return
+        adapter._build_send_client = lambda: client
+        return client
+
+    # --- config ---------------------------------------------------------
+
+    def test_catchup_disabled_by_default(self, monkeypatch):
+        monkeypatch.delenv("ZULIP_CATCHUP", raising=False)
+        adapter = _make_adapter()
+        assert adapter._catchup_enabled is False
+        assert adapter._catchup_max_messages == 100
+
+    def test_catchup_enabled_via_extra(self, monkeypatch):
+        monkeypatch.delenv("ZULIP_CATCHUP", raising=False)
+        from gateway.platforms.zulip import ZulipAdapter
+        cfg = PlatformConfig(
+            enabled=True, token="k",
+            extra={"site_url": "https://x.zulipchat.com", "bot_email": "b@x.com",
+                   "catchup_enabled": True, "catchup_max_messages": 25},
+        )
+        adapter = ZulipAdapter(cfg)
+        assert adapter._catchup_enabled is True
+        assert adapter._catchup_max_messages == 25
+
+    # --- sweep behavior -------------------------------------------------
+
+    def test_first_run_seeds_watermark_without_replay(self, tmp_path):
+        adapter, wm = self._adapter(tmp_path)
+        adapter._on_zulip_event = MagicMock()
+        self._send_client(adapter, {"result": "success", "messages": [{"id": 5000}]})
+
+        adapter._run_missed_message_catchup()
+
+        adapter._on_zulip_event.assert_not_called()  # seed only, no back-fill
+        assert json.loads(wm.read_text())["bugs"] == 5000
+
+    def test_replays_messages_after_watermark(self, tmp_path):
+        adapter, wm = self._adapter(tmp_path)
+        wm.write_text(json.dumps({"bugs": 100}))
+        adapter._on_zulip_event = MagicMock()
+        self._send_client(adapter, {
+            "result": "success",
+            "messages": [
+                {"id": 100, "type": "stream"},  # == watermark → skipped
+                {"id": 101, "type": "stream"},
+                {"id": 102, "type": "stream"},
+            ],
+        })
+
+        adapter._run_missed_message_catchup()
+
+        replayed_ids = [
+            c.args[0]["message"]["id"] for c in adapter._on_zulip_event.call_args_list
+        ]
+        assert replayed_ids == [101, 102]
+        assert adapter._on_zulip_event.call_args_list[0].args[0]["type"] == "message"
+
+    def test_sweep_respects_max_messages_bound(self, tmp_path):
+        adapter, wm = self._adapter(tmp_path, max_messages=5)
+        wm.write_text(json.dumps({"bugs": 100}))
+        adapter._on_zulip_event = MagicMock()
+        client = self._send_client(adapter, {"result": "success", "messages": []})
+
+        adapter._run_missed_message_catchup()
+
+        assert client.get_messages.call_args.args[0]["num_after"] == 5
+
+    # --- watermark advance ---------------------------------------------
+
+    def test_advance_watermark_monotonic(self, tmp_path):
+        adapter, wm = self._adapter(tmp_path)
+        adapter._advance_catchup_watermark(
+            {"type": "stream", "id": 200, "display_recipient": "bugs"})
+        adapter._advance_catchup_watermark(
+            {"type": "stream", "id": 100, "display_recipient": "bugs"})  # older
+        assert json.loads(wm.read_text())["bugs"] == 200
+
+    def test_advance_watermark_noop_when_disabled(self, tmp_path):
+        adapter, wm = self._adapter(tmp_path, enabled=False)
+        adapter._advance_catchup_watermark(
+            {"type": "stream", "id": 7, "display_recipient": "bugs"})
+        assert not wm.exists()
+
+    def test_advance_watermark_ignores_private_messages(self, tmp_path):
+        adapter, wm = self._adapter(tmp_path)
+        adapter._advance_catchup_watermark(
+            {"type": "private", "id": 300, "display_recipient": [{"email": "a@b.c"}]})
+        assert not wm.exists()
+
+
+# ---------------------------------------------------------------------------
 # Group DM send path
 # ---------------------------------------------------------------------------
 
