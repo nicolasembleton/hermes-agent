@@ -158,7 +158,7 @@ SEND_MESSAGE_SCHEMA = {
             },
             "target": {
                 "type": "string",
-                "description": "Delivery target. Format: 'platform' (uses home channel), 'platform:#channel-name', 'platform:chat_id', or 'platform:chat_id:thread_id' for Telegram topics and Discord threads. Examples: 'telegram', 'telegram:-1001234567890:17585', 'discord:999888777:555444333', 'discord:#bot-home', 'slack:#engineering', 'signal:+155****4567', 'matrix:!roomid:server.org', 'matrix:@user:server.org', 'ntfy:alerts-channel' (explicit ntfy topic), 'yuanbao:direct:<account_id>' (DM), 'yuanbao:group:<group_code>' (group chat)"
+                "description": "Delivery target. Format: 'platform' (uses home channel), 'platform:#channel-name', 'platform:chat_id', or 'platform:chat_id:thread_id' for Telegram topics, Discord threads, and Zulip stream topics. Examples: 'telegram', 'telegram:-1001234567890:17585', 'discord:999888777:555444333', 'discord:#bot-home', 'slack:#engineering', 'signal:+10000000000', 'matrix:!roomid:server.org', 'matrix:@user:server.org', 'ntfy:alerts-channel' (explicit ntfy topic), 'zulip:infra:general chat' (stream topic), 'zulip:dm:alice@example.com', 'zulip:group_dm:a@example.com,b@example.com', 'yuanbao:direct:<account_id>' (DM), 'yuanbao:group:<group_code>' (group chat)"
             },
             "message": {
                 "type": "string",
@@ -527,6 +527,14 @@ def _parse_target_ref(platform_name: str, target_ref: str):
         topic = target_ref.strip()
         if topic:
             return topic, None, True
+    if platform_name == "zulip":
+        trimmed = target_ref.strip()
+        if trimmed.startswith(("dm:", "group_dm:")):
+            return trimmed, None, True
+        if ":" in trimmed:
+            # Zulip stream targets are encoded as ``stream:topic`` or
+            # ``stream_id:topic``. The adapter resolves stream names to IDs.
+            return trimmed, None, True
     if platform_name == "email":
         match = _EMAIL_TARGET_RE.fullmatch(target_ref)
         if match:
@@ -923,6 +931,23 @@ async def _send_to_platform(platform, pconfig, chat_id, message, thread_id=None,
                 chunk,
                 media_files=media_files if is_last else None,
                 thread_id=thread_id,
+            )
+            if isinstance(result, dict) and result.get("error"):
+                return result
+            last_result = result
+        return last_result
+
+    # --- Zulip: upload files then send them as Markdown links via adapter ---
+    if platform == Platform.ZULIP and media_files:
+        last_result = None
+        for i, chunk in enumerate(chunks):
+            is_last = (i == len(chunks) - 1)
+            result = await _send_zulip_via_adapter(
+                pconfig,
+                chat_id,
+                chunk,
+                media_files=media_files if is_last else None,
+                thread_id=thread_id,
                 force_document=force_document,
             )
             if isinstance(result, dict) and result.get("error"):
@@ -934,7 +959,7 @@ async def _send_to_platform(platform, pconfig, chat_id, message, thread_id=None,
     if media_files and not message.strip():
         return {
             "error": (
-                f"send_message MEDIA delivery is currently only supported for telegram, discord, matrix, weixin, signal, yuanbao, feishu and whatsapp; "
+                f"send_message MEDIA delivery is currently only supported for telegram, discord, matrix, weixin, signal, yuanbao, feishu, whatsapp and zulip; "
                 f"target {platform.value} had only media attachments"
             )
         }
@@ -942,7 +967,7 @@ async def _send_to_platform(platform, pconfig, chat_id, message, thread_id=None,
     if media_files:
         warning = (
             f"MEDIA attachments were omitted for {platform.value}; "
-            "native send_message media delivery is currently only supported for telegram, discord, matrix, weixin, signal, yuanbao, feishu and whatsapp"
+            "native send_message media delivery is currently only supported for telegram, discord, matrix, weixin, signal, yuanbao, feishu, whatsapp and zulip"
         )
 
     last_result = None
@@ -973,6 +998,13 @@ async def _send_to_platform(platform, pconfig, chat_id, message, thread_id=None,
             result = await _registry_standalone_send("dingtalk", pconfig, chat_id, chunk, thread_id)
         elif platform == Platform.FEISHU:
             result = await _registry_standalone_send("feishu", pconfig, chat_id, chunk, thread_id)
+        elif platform == Platform.ZULIP:
+            result = await _send_zulip_via_adapter(
+                pconfig,
+                chat_id,
+                chunk,
+                thread_id=thread_id,
+            )
         elif platform == Platform.WECOM:
             result = await _registry_standalone_send("wecom", pconfig, chat_id, chunk, thread_id)
         elif platform == Platform.BLUEBUBBLES:
@@ -1529,6 +1561,81 @@ async def _send_matrix_via_adapter(pconfig, chat_id, message, media_files=None, 
 
 # _send_dingtalk moved to plugins/platforms/dingtalk/adapter.py::_standalone_send,
 # wired via standalone_sender_fn and reached through _registry_standalone_send. #41112.
+
+
+async def _send_zulip_via_adapter(
+    pconfig,
+    chat_id,
+    message,
+    media_files=None,
+    thread_id=None,
+    force_document=False,
+):
+    """Send through Zulip's adapter without starting the long-poll event queue."""
+    try:
+        from gateway.platforms.zulip import ZulipAdapter, check_zulip_requirements
+    except ImportError:
+        return {"error": "Zulip dependencies not installed. Install hermes-agent[zulip]."}
+
+    if not check_zulip_requirements(pconfig):
+        return {
+            "error": (
+                "Zulip is not configured. Set ZULIP_SITE_URL, "
+                "ZULIP_BOT_EMAIL, and ZULIP_API_KEY."
+            )
+        }
+
+    media_files = media_files or []
+    adapter = ZulipAdapter(pconfig)
+    # Standalone cron/CLI sends need the send/upload helpers but must not start
+    # the receive event queue.  A truthy marker satisfies the adapter's normal
+    # connected guard while each send creates its own Zulip HTTP client.
+    adapter._client = object()
+    metadata = {"thread_id": thread_id} if thread_id else None
+    last_result = None
+
+    try:
+        if message.strip():
+            last_result = await adapter.send(chat_id, message, metadata=metadata)
+            if not last_result.success:
+                return _error(f"Zulip send failed: {last_result.error}")
+
+        for media_path, is_voice in media_files:
+            if not os.path.exists(media_path):
+                return _error(f"Media file not found: {media_path}")
+
+            ext = os.path.splitext(media_path)[1].lower()
+            if ext in _IMAGE_EXTS and not force_document:
+                last_result = await adapter.send_image_file(
+                    chat_id, media_path, metadata=metadata
+                )
+            elif ext in _VIDEO_EXTS:
+                last_result = await adapter.send_video(chat_id, media_path, metadata=metadata)
+            elif ext in _VOICE_EXTS and is_voice:
+                last_result = await adapter.send_voice(chat_id, media_path, metadata=metadata)
+            elif ext in _AUDIO_EXTS:
+                last_result = await adapter.send_voice(chat_id, media_path, metadata=metadata)
+            else:
+                last_result = await adapter.send_document(
+                    chat_id, media_path, metadata=metadata
+                )
+
+            if not last_result.success:
+                return _error(f"Zulip media send failed: {last_result.error}")
+
+        if last_result is None:
+            return {"error": "No deliverable text or media remained after processing MEDIA tags"}
+
+        return {
+            "success": True,
+            "platform": "zulip",
+            "chat_id": chat_id,
+            "message_id": last_result.message_id,
+        }
+    except Exception as e:
+        return _error(f"Zulip send failed: {e}")
+    finally:
+        adapter._client = None
 
 
 # _send_wecom moved to plugins/platforms/wecom/adapter.py::_standalone_send,

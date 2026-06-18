@@ -164,6 +164,7 @@ class Platform(Enum):
     BLUEBUBBLES = "bluebubbles"
     QQBOT = "qqbot"
     YUANBAO = "yuanbao"
+    ZULIP = "zulip"
     RELAY = "relay"  # generic relay adapter fronted by the connector (EXPERIMENTAL)
     @classmethod
     def _missing_(cls, value):
@@ -481,6 +482,11 @@ _PLATFORM_CONNECTED_CHECKERS: dict[Platform, Callable[[PlatformConfig], bool]] =
     Platform.YUANBAO: lambda cfg: bool(
         cfg.extra.get("app_id") and cfg.extra.get("app_secret")
     ),
+    Platform.ZULIP: lambda cfg: bool(
+        cfg.extra.get("site_url")
+        and cfg.extra.get("bot_email")
+        and (cfg.token or cfg.api_key)
+    ),
     # Relay dials OUT to a connector; it is "connected" once an endpoint URL is
     # configured (extra["relay_url"] or extra["url"]). The capability descriptor
     # is negotiated at handshake time, so the URL is the only config-level
@@ -571,6 +577,13 @@ class GatewayConfig:
             return bool(
                 config.extra.get("account_id")
                 and (config.token or config.extra.get("token"))
+            )
+
+        if platform == Platform.ZULIP:
+            return bool(
+                config.extra.get("site_url")
+                and config.extra.get("bot_email")
+                and (config.token or config.api_key)
             )
 
         # Generic token/api_key auth covers Telegram, Discord, Slack, etc.
@@ -1874,6 +1887,45 @@ def _apply_env_overrides(config: GatewayConfig) -> None:
         yuanbao_group_allow_from = os.getenv("YUANBAO_GROUP_ALLOW_FROM")
         if yuanbao_group_allow_from:
             extra["group_allow_from"] = yuanbao_group_allow_from
+
+    zulip_api_key = os.getenv("ZULIP_API_KEY")
+    zulip_email = os.getenv("ZULIP_BOT_EMAIL")
+    zulip_site = os.getenv("ZULIP_SITE_URL")
+    zulip_default_stream = os.getenv("ZULIP_DEFAULT_STREAM")
+    zulip_home_topic = os.getenv("ZULIP_HOME_TOPIC", "").strip()
+    zulip_home = os.getenv("ZULIP_HOME_CHANNEL")
+    zulip_config: PlatformConfig | None = None
+    if any([zulip_api_key, zulip_default_stream, zulip_home_topic, zulip_home]):
+        if Platform.ZULIP not in config.platforms:
+            config.platforms[Platform.ZULIP] = PlatformConfig(enabled=bool(zulip_api_key))
+        zulip_config = config.platforms[Platform.ZULIP]
+    if zulip_api_key and zulip_config is not None:
+        if not zulip_email:
+            logger.warning("ZULIP_API_KEY set but ZULIP_BOT_EMAIL is missing")
+        if not zulip_site:
+            logger.warning("ZULIP_API_KEY set but ZULIP_SITE_URL is missing")
+        zulip_config.enabled = True
+        zulip_config.token = zulip_api_key
+        zulip_config.extra.update({
+            "site_url": zulip_site or "",
+            "bot_email": zulip_email or "",
+        })
+    if zulip_default_stream and zulip_config is not None:
+        zulip_config.extra["default_stream"] = zulip_default_stream
+    if zulip_home_topic and zulip_config is not None:
+        zulip_config.extra["home_topic"] = zulip_home_topic
+    if zulip_config is not None:
+        zulip_home_chat_id = zulip_home or ""
+        if not zulip_home_chat_id and zulip_default_stream and zulip_home_topic:
+            zulip_home_chat_id = zulip_default_stream
+        if zulip_home_topic and zulip_home_chat_id and ":" not in zulip_home_chat_id:
+            zulip_home_chat_id = f"{zulip_home_chat_id}:{zulip_home_topic}"
+        if zulip_home_chat_id:
+            zulip_config.home_channel = HomeChannel(
+                platform=Platform.ZULIP,
+                chat_id=zulip_home_chat_id,
+                name=os.getenv("ZULIP_HOME_CHANNEL_NAME", "Home"),
+            )
 
     # Session settings
     idle_minutes = os.getenv("SESSION_IDLE_MINUTES")

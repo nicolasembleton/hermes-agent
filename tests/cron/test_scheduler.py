@@ -205,6 +205,27 @@ class TestResolveDeliveryTarget:
             "thread_id": None,
         }
 
+    def test_bare_zulip_delivery_uses_home_stream_topic(self, monkeypatch):
+        monkeypatch.setenv("ZULIP_HOME_CHANNEL", "infra")
+        monkeypatch.setenv("ZULIP_HOME_TOPIC", "general chat")
+
+        assert _resolve_delivery_target({"deliver": "zulip"}) == {
+            "platform": "zulip",
+            "chat_id": "infra:general chat",
+            "thread_id": None,
+        }
+
+    def test_bare_zulip_delivery_uses_default_stream_and_home_topic(self, monkeypatch):
+        monkeypatch.delenv("ZULIP_HOME_CHANNEL", raising=False)
+        monkeypatch.setenv("ZULIP_DEFAULT_STREAM", "infra")
+        monkeypatch.setenv("ZULIP_HOME_TOPIC", "general chat")
+
+        assert _resolve_delivery_target({"deliver": "zulip"}) == {
+            "platform": "zulip",
+            "chat_id": "infra:general chat",
+            "thread_id": None,
+        }
+
     def test_bare_platform_delivery_preserves_home_thread_id(self, monkeypatch):
         monkeypatch.setenv("DISCORD_HOME_CHANNEL", "parent-42")
         monkeypatch.setenv("DISCORD_HOME_CHANNEL_THREAD_ID", "topic-7")
@@ -3614,6 +3635,24 @@ class TestHomeTargetEnvVarRegistry:
         from cron.scheduler import _HOME_TARGET_ENV_VARS
 
         assert _HOME_TARGET_ENV_VARS.get("whatsapp") == "WHATSAPP_HOME_CHANNEL"
+
+    def test_zulip_home_target_combines_stream_and_topic(self, monkeypatch):
+        """``deliver=zulip`` accepts stream and topic as separate env vars."""
+        from cron.scheduler import _get_home_target_chat_id
+
+        monkeypatch.setenv("ZULIP_HOME_CHANNEL", "infra")
+        monkeypatch.setenv("ZULIP_HOME_TOPIC", "general chat")
+
+        assert _get_home_target_chat_id("zulip") == "infra:general chat"
+
+    def test_zulip_home_target_keeps_embedded_topic(self, monkeypatch):
+        """A full ``stream:topic`` Zulip home target should not be rewritten."""
+        from cron.scheduler import _get_home_target_chat_id
+
+        monkeypatch.setenv("ZULIP_HOME_CHANNEL", "infra:alerts")
+        monkeypatch.setenv("ZULIP_HOME_TOPIC", "general chat")
+
+        assert _get_home_target_chat_id("zulip") == "infra:alerts"
 
 
 class TestCronDeliveryMirror:
