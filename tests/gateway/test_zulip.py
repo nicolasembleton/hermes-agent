@@ -817,6 +817,132 @@ class TestZulipInboundDispatch:
 
 
 # ---------------------------------------------------------------------------
+# Inbound upload images (vision)
+# ---------------------------------------------------------------------------
+
+
+class TestZulipInboundUploadImages:
+    def setup_method(self):
+        self.adapter = _make_adapter(bot_email="bot@example.zulipchat.com")
+        self.adapter._bot_user_id = 42
+        self.adapter._bot_full_name = "Hermes Bot"
+        self.adapter.handle_message = AsyncMock()
+
+    def _dm_message(self, content):
+        return {
+            "id": 600,
+            "sender_email": "alice@example.com",
+            "sender_full_name": "Alice",
+            "sender_id": 10,
+            "type": "private",
+            "content": content,
+            "display_recipient": [
+                {"email": "bot@example.zulipchat.com"},
+                {"email": "alice@example.com"},
+            ],
+        }
+
+    def test_extract_image_paths_from_markdown(self):
+        from gateway.platforms.zulip import _extract_upload_image_paths
+        content = (
+            "look at this\n"
+            "[shot.png](/user_uploads/2/ab/cdef123/shot.png)"
+        )
+        assert _extract_upload_image_paths(content) == [
+            "/user_uploads/2/ab/cdef123/shot.png"
+        ]
+
+    def test_extract_image_paths_inline_image_syntax(self):
+        from gateway.platforms.zulip import _extract_upload_image_paths
+        content = "![alt text](/user_uploads/2/ab/cdef123/screen.jpg)"
+        assert _extract_upload_image_paths(content) == [
+            "/user_uploads/2/ab/cdef123/screen.jpg"
+        ]
+
+    def test_extract_image_paths_absolute_url_normalized(self):
+        from gateway.platforms.zulip import _extract_upload_image_paths
+        content = (
+            "[s.png](https://chat.example.com"
+            "/user_uploads/2/ab/cdef123/s.png)"
+        )
+        assert _extract_upload_image_paths(content) == [
+            "/user_uploads/2/ab/cdef123/s.png"
+        ]
+
+    def test_extract_image_paths_skips_non_images(self):
+        from gateway.platforms.zulip import _extract_upload_image_paths
+        content = (
+            "[report.pdf](/user_uploads/2/ab/cdef123/report.pdf) and "
+            "[notes.txt](/user_uploads/2/ab/cdef123/notes.txt)"
+        )
+        assert _extract_upload_image_paths(content) == []
+
+    def test_extract_image_paths_dedupes_preserving_order(self):
+        from gateway.platforms.zulip import _extract_upload_image_paths
+        content = (
+            "[a.png](/user_uploads/1/a/a.png)"
+            "[b.png](/user_uploads/1/b/b.png)"
+            "[a.png](/user_uploads/1/a/a.png)"
+        )
+        assert _extract_upload_image_paths(content) == [
+            "/user_uploads/1/a/a.png",
+            "/user_uploads/1/b/b.png",
+        ]
+
+    def test_extract_image_paths_no_uploads(self):
+        from gateway.platforms.zulip import _extract_upload_image_paths
+        assert _extract_upload_image_paths("plain text") == []
+        assert _extract_upload_image_paths("") == []
+
+    @pytest.mark.asyncio
+    async def test_dm_with_pasted_image_sets_media_fields(self):
+        """A DM containing an upload link should carry the downloaded
+        image in media_urls/media_types on the MessageEvent."""
+        self.adapter._fetch_inbound_images = AsyncMock(
+            return_value=(["/tmp/cache/img_abc.png"], ["image/png"])
+        )
+        message = self._dm_message(
+            "what's wrong here? [shot.png](/user_uploads/2/ab/x/shot.png)"
+        )
+
+        await self.adapter._dispatch_inbound(message, {"message": message})
+
+        self.adapter._fetch_inbound_images.assert_awaited_once()
+        msg_event = self.adapter.handle_message.call_args[0][0]
+        assert msg_event.media_urls == ["/tmp/cache/img_abc.png"]
+        assert msg_event.media_types == ["image/png"]
+
+    @pytest.mark.asyncio
+    async def test_dm_without_uploads_skips_fetch(self):
+        """No /user_uploads/ link → the fetch helper is never called."""
+        self.adapter._fetch_inbound_images = AsyncMock()
+        message = self._dm_message("just words")
+
+        await self.adapter._dispatch_inbound(message, {"message": message})
+
+        self.adapter._fetch_inbound_images.assert_not_called()
+        msg_event = self.adapter.handle_message.call_args[0][0]
+        assert msg_event.media_urls == []
+
+    @pytest.mark.asyncio
+    async def test_fetch_failure_still_dispatches_text(self):
+        """Download errors must never drop the message."""
+        self.adapter._fetch_inbound_images = AsyncMock(
+            return_value=([], [])
+        )
+        message = self._dm_message(
+            "[shot.png](/user_uploads/2/ab/x/shot.png)"
+        )
+
+        await self.adapter._dispatch_inbound(message, {"message": message})
+
+        assert self.adapter.handle_message.called
+        msg_event = self.adapter.handle_message.call_args[0][0]
+        assert "/user_uploads/" in msg_event.text
+        assert msg_event.media_urls == []
+
+
+# ---------------------------------------------------------------------------
 # Group DM send path
 # ---------------------------------------------------------------------------
 

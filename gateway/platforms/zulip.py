@@ -53,6 +53,52 @@ logger = logging.getLogger(__name__)
 # the practical limit used by other adapters in this codebase.
 MAX_MESSAGE_LENGTH = 4000
 
+# Inbound pasted/attached files arrive in message content as markdown links
+# targeting the realm's /user_uploads/ endpoint:
+#   ![alt](/user_uploads/2/ab/cdef123/shot.png)          (image, inline)
+#   [report.pdf](/user_uploads/2/ab/cdef123/report.pdf)  (file link)
+# _extract_upload_image_paths() pulls out the image ones so _dispatch_inbound
+# can download them for vision (media_urls on the MessageEvent).
+_USER_UPLOAD_LINK_RE = re.compile(
+    r"\(((?:https?://[^()\s]+)?/user_uploads/[^()\s]+)\)"
+)
+
+# Image types vision-capable providers accept; other upload types stay
+# plain text links in the message.
+_UPLOAD_IMAGE_EXTENSIONS = {
+    ".png": "image/png",
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".gif": "image/gif",
+    ".webp": "image/webp",
+}
+
+# Hard ceiling per downloaded upload. Provider-side image size limits are
+# enforced downstream (shrink-on-reject in the agent loop); this only guards
+# the gateway against pathological downloads.
+_MAX_UPLOAD_DOWNLOAD_BYTES = 25 * 1024 * 1024
+
+
+def _extract_upload_image_paths(content: str) -> List[str]:
+    """Return unique ``/user_uploads/`` image paths from *content*, in order.
+
+    Absolute URLs are normalized down to their ``/user_uploads/...`` path so
+    the download always targets the configured site (never a foreign host
+    smuggled into a markdown link).
+    """
+    paths: List[str] = []
+    seen = set()
+    for match in _USER_UPLOAD_LINK_RE.finditer(content or ""):
+        target = match.group(1)
+        path = target[target.find("/user_uploads/"):]
+        if Path(path).suffix.lower() not in _UPLOAD_IMAGE_EXTENSIONS:
+            continue
+        if path in seen:
+            continue
+        seen.add(path)
+        paths.append(path)
+    return paths
+
 # Event-queue reconnect parameters (exponential backoff).
 _RECONNECT_BASE_DELAY = 2.0
 _RECONNECT_MAX_DELAY = 60.0
@@ -1647,6 +1693,72 @@ class ZulipAdapter(BasePlatformAdapter):
         )
         return context_lines
 
+    async def _fetch_inbound_images(
+        self, content: str
+    ) -> Tuple[List[str], List[str]]:
+        """Download pasted ``/user_uploads/`` images from *content* into the
+        local image cache so the agent can see them.
+
+        Uses the documented two-step flow (Zulip 5.0+, feature level 50):
+        ``GET /api/v1/user_uploads/{realm_id}/{path}`` with API Basic auth
+        returns a short-lived signed URL; the bytes are then fetched from
+        that URL without auth (it may redirect to an external storage
+        backend such as S3).
+
+        Returns parallel ``(local_paths, mime_types)`` lists. Failures are
+        logged and skipped — the message always goes through, at worst as
+        plain text with the original upload link.
+        """
+        import httpx
+
+        paths = _extract_upload_image_paths(content)
+        if not paths:
+            return [], []
+
+        local_paths: List[str] = []
+        mime_types: List[str] = []
+        async with httpx.AsyncClient(
+            timeout=30.0, follow_redirects=True,
+        ) as client:
+            for path in paths:
+                try:
+                    resp = await client.get(
+                        f"{self._site_url}/api/v1{path}",
+                        auth=(self._bot_email, self._api_key),
+                    )
+                    resp.raise_for_status()
+                    signed = (resp.json() or {}).get("url", "")
+                    if not signed:
+                        logger.warning(
+                            "Zulip: no signed URL for upload %s", path
+                        )
+                        continue
+                    if signed.startswith("/"):
+                        signed = f"{self._site_url}{signed}"
+                    dl = await client.get(signed)
+                    dl.raise_for_status()
+                    data = dl.content
+                    if len(data) > _MAX_UPLOAD_DOWNLOAD_BYTES:
+                        logger.warning(
+                            "Zulip: upload %s too large (%d bytes), skipping",
+                            path, len(data),
+                        )
+                        continue
+                    ext = Path(path).suffix.lower()
+                    cached = cache_image_from_bytes(data, ext)
+                    local_paths.append(cached)
+                    mime_types.append(_UPLOAD_IMAGE_EXTENSIONS[ext])
+                except Exception as exc:
+                    logger.warning(
+                        "Zulip: failed to fetch upload %s — %s", path, exc,
+                    )
+        if local_paths:
+            logger.info(
+                "Zulip: downloaded %d inbound image(s) for vision",
+                len(local_paths),
+            )
+        return local_paths, mime_types
+
     async def _dispatch_inbound(self, message: Dict[str, Any], raw_event: Dict[str, Any]) -> None:
         """Process an inbound message on the asyncio event loop.
 
@@ -1779,6 +1891,18 @@ class ZulipAdapter(BasePlatformAdapter):
             chat_topic=chat_topic,
         )
 
+        # Download pasted images from the TRIGGERING message so the agent
+        # can see them (the gateway routes media_urls into vision). Parsed
+        # from the raw message content, not the context-prepended text, so
+        # historical-context images stay text links.
+        media_urls: List[str] = []
+        media_types: List[str] = []
+        raw_content = message.get("content") or ""
+        if "/user_uploads/" in raw_content:
+            media_urls, media_types = await self._fetch_inbound_images(
+                raw_content
+            )
+
         msg_event = MessageEvent(
             text=content,
             message_type=mt,
@@ -1786,6 +1910,8 @@ class ZulipAdapter(BasePlatformAdapter):
             raw_message=raw_event,
             message_id=msg_id,
             reply_to_message_id=reply_to_id,
+            media_urls=media_urls,
+            media_types=media_types,
         )
 
         # Schedule the handler coroutine on the event loop.
