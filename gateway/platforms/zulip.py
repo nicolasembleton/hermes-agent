@@ -611,8 +611,14 @@ class ZulipAdapter(BasePlatformAdapter):
     # Required overrides
     # ------------------------------------------------------------------
 
-    async def connect(self) -> bool:
-        """Connect to Zulip, verify auth, and start the event queue."""
+    async def connect(self, *, is_reconnect: bool = False) -> bool:
+        """Connect to Zulip, verify auth, and start the event queue.
+
+        ``is_reconnect`` is forwarded by the gateway reconnect watcher after an
+        outage. Zulip registers a fresh event queue on each connect; optional
+        catch-up (when enabled) back-fills missed stream messages before going
+        live.
+        """
         if not self._site_url or not self._api_key or not self._bot_email:
             logger.error(
                 "Zulip: missing configuration (site_url, api_key, or bot_email)"
