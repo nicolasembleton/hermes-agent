@@ -526,7 +526,7 @@ class ZulipAdapter(BasePlatformAdapter):
     # Required overrides
     # ------------------------------------------------------------------
 
-    async def connect(self) -> bool:
+    async def connect(self, *, is_reconnect: bool = False) -> bool:
         """Connect to Zulip, verify auth, and start the event queue."""
         if not self._site_url or not self._api_key or not self._bot_email:
             logger.error(

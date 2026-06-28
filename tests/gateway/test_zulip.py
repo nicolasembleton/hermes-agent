@@ -485,6 +485,32 @@ class TestZulipConnect:
         )
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize("is_reconnect", [False, True])
+    async def test_connect_accepts_is_reconnect_kwarg(self, is_reconnect):
+        """gateway/run.py always passes is_reconnect= since #46621."""
+        adapter = _make_adapter()
+
+        mock_client = MagicMock()
+        mock_client.get_profile.return_value = {
+            "result": "success",
+            "profile": {"user_id": 42, "full_name": "Hermes Bot"},
+        }
+        mock_client.get_streams.return_value = {
+            "result": "success",
+            "streams": [{"stream_id": 10, "name": "general"}],
+        }
+        mock_client.call_on_each_event.side_effect = lambda *args, **kwargs: setattr(
+            adapter, "_closing", True
+        )
+
+        adapter._loop = asyncio.get_running_loop()
+
+        with patch.dict("sys.modules", {"zulip": MagicMock(Client=MagicMock(return_value=mock_client))}):
+            result = await adapter.connect(is_reconnect=is_reconnect)
+
+        assert result is True
+
+    @pytest.mark.asyncio
     async def test_connect_profile_at_top_level(self):
         """Zulip API returns user profile at top level, not nested under 'profile'.
 
