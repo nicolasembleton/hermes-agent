@@ -2989,10 +2989,14 @@ class BasePlatformAdapter(ABC):
         """
         pass
 
-    async def stop_typing(self, chat_id: str) -> None:
+    async def stop_typing(self, chat_id: str, metadata=None) -> None:
         """Stop a persistent typing indicator (if the platform uses one).
 
         Override in subclasses that start background typing loops.
+        metadata: optional dict with platform-specific routing context; for
+        threaded platforms, callers pass the same metadata used for send_typing
+        so the stop request clears the exact stream/topic/thread that was
+        marked as typing.
         Default is a no-op for platforms with one-shot typing indicators.
         """
         pass
@@ -3565,6 +3569,33 @@ class BasePlatformAdapter(ABC):
 
         return paths, cleaned
 
+    async def _call_stop_typing(self, chat_id: str, metadata=None) -> None:
+        """Call stop_typing while preserving older adapter signatures.
+
+        Newer threaded adapters can accept metadata so stop requests target the
+        same stream/topic/thread as send_typing. Several existing adapters still
+        implement stop_typing(chat_id) only; inspect the bound method and omit
+        metadata for those adapters instead of widening every platform in this
+        fix.
+        """
+        try:
+            stop_sig = inspect.signature(self.stop_typing)
+        except (TypeError, ValueError):
+            stop_sig = None
+        accepts_metadata = False
+        if stop_sig is not None:
+            accepts_metadata = (
+                "metadata" in stop_sig.parameters
+                or any(
+                    p.kind == inspect.Parameter.VAR_KEYWORD
+                    for p in stop_sig.parameters.values()
+                )
+            )
+        if accepts_metadata:
+            await self.stop_typing(chat_id, metadata=metadata)
+        else:
+            await self.stop_typing(chat_id)
+
     async def _keep_typing(
         self,
         chat_id: str,
@@ -3640,11 +3671,10 @@ class BasePlatformAdapter(ABC):
             # _keep_typing may have called send_typing() after an outer
             # stop_typing() cleared the task dict, recreating the loop.
             # Cancelling _keep_typing alone won't clean that up.
-            if hasattr(self, "stop_typing"):
-                try:
-                    await self.stop_typing(chat_id)
-                except Exception:
-                    pass
+            try:
+                await self._call_stop_typing(chat_id, metadata=metadata)
+            except Exception:
+                pass
             self._typing_paused.discard(chat_id)
 
     async def _stop_typing_refresh(
@@ -3652,6 +3682,7 @@ class BasePlatformAdapter(ABC):
         chat_id: str,
         typing_task: asyncio.Task | None = None,
         *,
+        metadata=None,
         timeout: float = 0.5,
         stop_attempts: int = 2,
     ) -> None:
@@ -3666,12 +3697,10 @@ class BasePlatformAdapter(ABC):
                     # The task is cancelled; don't let a slow adapter-specific
                     # cleanup block response delivery or shutdown.
                     pass
-            if not hasattr(self, "stop_typing"):
-                return
             attempts = max(1, stop_attempts)
             for attempt in range(attempts):
                 try:
-                    await self.stop_typing(chat_id)
+                    await self._call_stop_typing(chat_id, metadata=metadata)
                 except Exception:
                     pass
                 if attempt < attempts - 1:
@@ -4629,6 +4658,7 @@ class BasePlatformAdapter(ABC):
             await self._stop_typing_refresh(
                 event.source.chat_id,
                 typing_task,
+                metadata=_thread_metadata,
             )
         
         try:
@@ -5052,6 +5082,7 @@ class BasePlatformAdapter(ABC):
             await self._stop_typing_refresh(
                 event.source.chat_id,
                 None,
+                metadata=_thread_metadata,
                 stop_attempts=1,
             )
             # Final drain/release boundary: force-flush any timer that missed

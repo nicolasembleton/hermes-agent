@@ -204,7 +204,7 @@ _KNOWN_DELIVERY_PLATFORMS = frozenset({
     "telegram", "discord", "slack", "whatsapp", "signal",
     "matrix", "mattermost", "homeassistant", "dingtalk", "feishu",
     "wecom", "wecom_callback", "weixin", "sms", "email", "webhook", "bluebubbles",
-    "qqbot", "yuanbao",
+    "qqbot", "yuanbao", "zulip",
 })
 
 # Platforms that support a configured cron/notification home target, mapped to
@@ -226,6 +226,7 @@ _HOME_TARGET_ENV_VARS = {
     "qqbot": "QQBOT_HOME_CHANNEL",
     "whatsapp": "WHATSAPP_HOME_CHANNEL",
     "whatsapp_cloud": "WHATSAPP_CLOUD_HOME_CHANNEL",
+    "zulip": "ZULIP_HOME_CHANNEL",
 }
 
 # Legacy env var names kept for back-compat.  Each entry is the current
@@ -723,6 +724,12 @@ def _get_home_target_chat_id(platform_name: str) -> str:
         legacy = _LEGACY_HOME_TARGET_ENV_VARS.get(env_var)
         if legacy:
             value = os.getenv(legacy, "")
+    if env_var == "ZULIP_HOME_CHANNEL":
+        topic = os.getenv("ZULIP_HOME_TOPIC", "").strip()
+        if not value and topic:
+            value = os.getenv("ZULIP_DEFAULT_STREAM", "").strip()
+        if value and topic and ":" not in value:
+            value = f"{value}:{topic}"
     return value
 
 

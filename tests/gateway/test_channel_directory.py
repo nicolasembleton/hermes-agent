@@ -280,6 +280,29 @@ class TestBuildFromSessions:
         assert "Coaching Chat / topic 17585" in names
         assert "Coaching Chat / topic 17587" in names
 
+    def test_zulip_stream_session_does_not_duplicate_topic_in_id(self, tmp_path):
+        self._write_sessions(tmp_path, {
+            "zulip_topic": {
+                "origin": {
+                    "platform": "zulip",
+                    "chat_type": "stream",
+                    "chat_id": "42:general",
+                    "chat_name": "engineering",
+                    "chat_topic": "general",
+                },
+            },
+        })
+
+        with patch.dict(os.environ, {"HERMES_HOME": str(tmp_path)}):
+            entries = _build_from_sessions("zulip")
+
+        assert entries == [{
+            "id": "42:general",
+            "name": "engineering / general",
+            "type": "stream",
+            "thread_id": None,
+        }]
+
 
 class TestFormatDirectoryForDisplay:
     def test_empty_directory(self, tmp_path):

@@ -205,6 +205,27 @@ class TestResolveDeliveryTarget:
             "thread_id": None,
         }
 
+    def test_bare_zulip_delivery_uses_home_stream_topic(self, monkeypatch):
+        monkeypatch.setenv("ZULIP_HOME_CHANNEL", "general")
+        monkeypatch.setenv("ZULIP_HOME_TOPIC", "general chat")
+
+        assert _resolve_delivery_target({"deliver": "zulip"}) == {
+            "platform": "zulip",
+            "chat_id": "general:general chat",
+            "thread_id": None,
+        }
+
+    def test_bare_zulip_delivery_uses_default_stream_and_home_topic(self, monkeypatch):
+        monkeypatch.delenv("ZULIP_HOME_CHANNEL", raising=False)
+        monkeypatch.setenv("ZULIP_DEFAULT_STREAM", "general")
+        monkeypatch.setenv("ZULIP_HOME_TOPIC", "general chat")
+
+        assert _resolve_delivery_target({"deliver": "zulip"}) == {
+            "platform": "zulip",
+            "chat_id": "general:general chat",
+            "thread_id": None,
+        }
+
     def test_bare_platform_delivery_preserves_home_thread_id(self, monkeypatch):
         monkeypatch.setenv("DISCORD_HOME_CHANNEL", "parent-42")
         monkeypatch.setenv("DISCORD_HOME_CHANNEL_THREAD_ID", "topic-7")

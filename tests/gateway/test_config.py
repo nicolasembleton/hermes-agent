@@ -1140,3 +1140,67 @@ class TestHomeChannelEnvOverrides:
             home = config.platforms[platform].home_channel
             assert home is not None, f"{platform.value}: home_channel should not be None"
             assert (home.chat_id, home.name) == expected, platform.value
+
+    def test_zulip_optional_env_creates_platform_config_without_credentials(self):
+        """Non-secret Zulip routing env should not require API credentials."""
+        config = GatewayConfig()
+
+        with patch.dict(
+            os.environ,
+            {
+                "ZULIP_DEFAULT_STREAM": "general",
+                "ZULIP_HOME_TOPIC": " general chat ",
+                "ZULIP_HOME_CHANNEL": "general",
+            },
+            clear=True,
+        ):
+            _apply_env_overrides(config)
+
+        zulip_config = config.platforms[Platform.ZULIP]
+        assert zulip_config.enabled is False
+        assert zulip_config.extra["default_stream"] == "general"
+        assert zulip_config.extra["home_topic"] == "general chat"
+        assert zulip_config.home_channel is not None
+        assert zulip_config.home_channel.chat_id == "general:general chat"
+
+    def test_zulip_home_channel_with_embedded_topic_is_not_modified(self):
+        config = GatewayConfig()
+
+        with patch.dict(
+            os.environ,
+            {
+                "ZULIP_HOME_CHANNEL": "general:alerts",
+                "ZULIP_HOME_TOPIC": "general chat",
+            },
+            clear=True,
+        ):
+            _apply_env_overrides(config)
+
+        home = config.platforms[Platform.ZULIP].home_channel
+        assert home is not None
+        assert home.chat_id == "general:alerts"
+
+    def test_zulip_default_stream_and_home_topic_define_home_channel(self):
+        config = GatewayConfig()
+
+        with patch.dict(
+            os.environ,
+            {
+                "ZULIP_DEFAULT_STREAM": "general",
+                "ZULIP_HOME_TOPIC": "general chat",
+            },
+            clear=True,
+        ):
+            _apply_env_overrides(config)
+
+        home = config.platforms[Platform.ZULIP].home_channel
+        assert home is not None
+        assert home.chat_id == "general:general chat"
+
+    def test_zulip_home_topic_without_stream_does_not_create_invalid_home_channel(self):
+        config = GatewayConfig()
+
+        with patch.dict(os.environ, {"ZULIP_HOME_TOPIC": "general chat"}, clear=True):
+            _apply_env_overrides(config)
+
+        assert config.platforms[Platform.ZULIP].home_channel is None
