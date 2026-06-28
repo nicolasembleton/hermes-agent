@@ -231,6 +231,48 @@ class TestSendMessageTool:
         assert thread_id is None
         assert is_explicit is True
 
+    def test_zulip_send_routes_through_standalone_adapter(self):
+        from gateway.platforms.base import SendResult
+
+        sent = []
+
+        class FakeZulipAdapter:
+            def __init__(self, pconfig):
+                self.config = pconfig
+                self._client = None
+
+            async def send(self, chat_id, content, metadata=None):
+                sent.append((chat_id, content, metadata, self._client is not None))
+                return SendResult(success=True, message_id="42")
+
+        cfg = SimpleNamespace(
+            token="key",
+            api_key=None,
+            extra={
+                "site_url": "https://example.zulipchat.com",
+                "bot_email": "bot@example.com",
+            },
+        )
+
+        with patch("gateway.platforms.zulip.check_zulip_requirements", return_value=True), \
+             patch("gateway.platforms.zulip.ZulipAdapter", FakeZulipAdapter):
+            result = asyncio.run(
+                _send_to_platform(
+                    Platform.ZULIP,
+                    cfg,
+                    "general:general chat",
+                    "hello",
+                )
+            )
+
+        assert result == {
+            "success": True,
+            "platform": "zulip",
+            "chat_id": "general:general chat",
+            "message_id": "42",
+        }
+        assert sent == [("general:general chat", "hello", None, True)]
+
     def test_ntfy_topic_target_bypasses_channel_directory(self):
         ntfy_platform = Platform("ntfy")
         ntfy_cfg = SimpleNamespace(enabled=True, token=None, extra={"topic": "hermes-in"})
@@ -267,32 +309,35 @@ class TestSendMessageTool:
         )
 
     def test_cron_duplicate_target_is_skipped_and_explained(self):
+        from gateway.session_context import _VAR_MAP
+
         home = SimpleNamespace(chat_id="-1001")
         config, _telegram_cfg = _make_config()
         config.get_home_channel = lambda _platform: home
+        tokens = [
+            _VAR_MAP["HERMES_CRON_AUTO_DELIVER_PLATFORM"].set("telegram"),
+            _VAR_MAP["HERMES_CRON_AUTO_DELIVER_CHAT_ID"].set("-1001"),
+            _VAR_MAP["HERMES_CRON_AUTO_DELIVER_THREAD_ID"].set(""),
+        ]
 
-        with patch.dict(
-            os.environ,
-            {
-                "HERMES_CRON_AUTO_DELIVER_PLATFORM": "telegram",
-                "HERMES_CRON_AUTO_DELIVER_CHAT_ID": "-1001",
-            },
-            clear=False,
-        ), \
-             patch("gateway.config.load_gateway_config", return_value=config), \
-             patch("tools.interrupt.is_interrupted", return_value=False), \
-             patch("model_tools._run_async", side_effect=_run_async_immediately), \
-             patch("tools.send_message_tool._send_to_platform", new=AsyncMock(return_value={"success": True})) as send_mock, \
-             patch("gateway.mirror.mirror_to_session", return_value=True) as mirror_mock:
-            result = json.loads(
-                send_message_tool(
-                    {
-                        "action": "send",
-                        "target": "telegram",
-                        "message": "hello",
-                    }
+        try:
+            with patch("gateway.config.load_gateway_config", return_value=config), \
+                 patch("tools.interrupt.is_interrupted", return_value=False), \
+                 patch("model_tools._run_async", side_effect=_run_async_immediately), \
+                 patch("tools.send_message_tool._send_to_platform", new=AsyncMock(return_value={"success": True})) as send_mock, \
+                 patch("gateway.mirror.mirror_to_session", return_value=True) as mirror_mock:
+                result = json.loads(
+                    send_message_tool(
+                        {
+                            "action": "send",
+                            "target": "telegram",
+                            "message": "hello",
+                        }
+                    )
                 )
-            )
+        finally:
+            for token in reversed(tokens):
+                token.var.reset(token)
 
         assert result["success"] is True
         assert result["skipped"] is True

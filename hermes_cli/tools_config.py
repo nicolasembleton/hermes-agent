@@ -1356,6 +1356,8 @@ def _get_enabled_platforms() -> List[str]:
         enabled.append("whatsapp")
     if get_env_value("QQ_APP_ID"):
         enabled.append("qqbot")
+    if get_env_value("ZULIP_API_KEY") and get_env_value("ZULIP_SITE_URL"):
+        enabled.append("zulip")
     return enabled
 
 

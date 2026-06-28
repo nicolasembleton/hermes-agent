@@ -18,15 +18,37 @@ def _run_async_immediately(coro):
 
 
 def test_photon_e164_target_is_explicit() -> None:
-    chat_id, thread_id, is_explicit = _parse_target_ref("photon", "+15551234567")
+    chat_id, thread_id, is_explicit = _parse_target_ref("photon", "+10000000000")
 
-    assert chat_id == "+15551234567"
+    assert chat_id == "+10000000000"
     assert thread_id is None
     assert is_explicit is True
 
 
 def test_e164_target_still_requires_phone_platform() -> None:
-    assert _parse_target_ref("matrix", "+15551234567")[2] is False
+    assert _parse_target_ref("matrix", "+10000000000")[2] is False
+
+
+def test_zulip_stream_topic_target_is_explicit() -> None:
+    assert _parse_target_ref("zulip", "123:General") == ("123:General", None, True)
+    assert _parse_target_ref("zulip", "general:general chat") == (
+        "general:general chat",
+        None,
+        True,
+    )
+
+
+def test_zulip_dm_targets_are_explicit() -> None:
+    assert _parse_target_ref("zulip", "dm:alice@example.com") == (
+        "dm:alice@example.com",
+        None,
+        True,
+    )
+    assert _parse_target_ref("zulip", "group_dm:a@example.com,b@example.com") == (
+        "group_dm:a@example.com,b@example.com",
+        None,
+        True,
+    )
 
 
 def test_whatsapp_group_jid_target_is_explicit() -> None:

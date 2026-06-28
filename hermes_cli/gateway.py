@@ -4778,6 +4778,45 @@ _PLATFORMS = [
             },
         ],
     },
+    {
+        "key": "zulip",
+        "label": "Zulip",
+        "emoji": "💬",
+        "token_var": "ZULIP_API_KEY",
+        "setup_instructions": [
+            "1. Log into your Zulip org (cloud or self-hosted)",
+            "2. Settings → Your bots → Add a new bot",
+            "3. Bot type: Generic bot. Give it a name and email (e.g. hermes-bot@yourorg.zulipchat.com)",
+            "4. Copy the Site URL, the bot's email, and the API key (shown only once)",
+            "5. Subscribe the bot to any streams you want it to participate in (DMs work automatically)",
+        ],
+        "vars": [
+            {
+                "name": "ZULIP_SITE_URL",
+                "prompt": "Zulip site URL",
+                "password": False,
+                "help": "e.g. https://yourorg.zulipchat.com or your self-hosted URL",
+            },
+            {
+                "name": "ZULIP_BOT_EMAIL",
+                "prompt": "Bot email address",
+                "password": False,
+                "help": "The full email of the bot user you just created",
+            },
+            {
+                "name": "ZULIP_API_KEY",
+                "prompt": "Bot API key",
+                "password": True,
+                "help": "The API key shown right after creating the bot (copy it now — it won't be shown again)",
+            },
+            {
+                "name": "ZULIP_DEFAULT_STREAM",
+                "prompt": "Default stream (optional)",
+                "password": False,
+                "help": "Stream name the bot will post to by default (you can also use /set-home later)",
+            },
+        ],
+    },
 ]
 
 
