@@ -6,6 +6,7 @@ from unittest.mock import patch, MagicMock
 from gateway.config import Platform, HomeChannel, GatewayConfig, PlatformConfig
 from gateway.platforms.base import MessageEvent
 from gateway.session import (
+    SessionEntry,
     SessionSource,
     SessionStore,
     build_session_context,
@@ -1400,3 +1401,76 @@ class TestRewriteTranscriptPreservesReasoning:
             "before user",
             "before assistant",
         ]
+
+
+class TestSessionKeyPathSafety:
+    """A Zulip topic with a '/' (e.g. "Ryan 6/17") must not make the session
+    key trip the CWE-22 guard in SessionEntry.from_dict, which would silently
+    drop the session on load. Keys are sanitized on build, and legacy raw-'/'
+    entries are adopted (re-keyed) on load instead of being skipped.
+    """
+
+    def test_build_session_key_sanitizes_slash_in_topic(self):
+        # Zulip stream chat_id is "{stream_id}:{topic}"; a dated topic carries a '/'.
+        source = SessionSource(
+            platform=Platform.ZULIP,
+            chat_id="11:Ryan Changes 6/17",
+            chat_type="stream",
+            user_id="user21@example.com",
+        )
+        key = build_session_key(source)
+        assert "/" not in key
+        assert "6_17" in key
+        # The sanitized key now survives the from_dict path-safety guard.
+        SessionEntry.from_dict({
+            "session_key": key, "session_id": "sid-new",
+            "created_at": "2026-01-01T00:00:00", "updated_at": "2026-01-01T00:00:00",
+        })
+
+    def test_load_migrates_legacy_slash_key_instead_of_skipping(self, tmp_path, monkeypatch):
+        import hermes_state
+        monkeypatch.setattr(hermes_state, "DEFAULT_DB_PATH", tmp_path / "state.db")
+        legacy_key = "agent:main:zulip:stream:11:Ryan Changes 6/17:user21@example.com"
+        safe_key = "agent:main:zulip:stream:11:Ryan Changes 6_17:user21@example.com"
+        sessions_file = tmp_path / "sessions.json"
+        sessions_file.write_text(json.dumps({
+            legacy_key: {
+                "session_key": legacy_key, "session_id": "sid-legacy",
+                "created_at": "2026-01-01T00:00:00", "updated_at": "2026-01-01T00:00:00",
+            },
+        }))
+
+        config = GatewayConfig()
+        store = SessionStore(sessions_dir=tmp_path, config=config)
+        store._ensure_loaded()
+
+        # Adopted under the sanitized key, not skipped; transcript (session_id) preserved.
+        assert safe_key in store._entries
+        assert legacy_key not in store._entries
+        assert store._entries[safe_key].session_id == "sid-legacy"
+
+        # Migration is durable: sessions.json was rewritten with the sanitized key.
+        reloaded = json.loads(sessions_file.read_text())
+        assert safe_key in reloaded
+        assert legacy_key not in reloaded
+
+    def test_load_still_skips_unsafe_session_id(self, tmp_path, monkeypatch):
+        """A truly unsafe session_id (a real file path) is still skipped — only
+        the lookup key is sanitized, never the on-disk transcript filename."""
+        import hermes_state
+        monkeypatch.setattr(hermes_state, "DEFAULT_DB_PATH", tmp_path / "state.db")
+        bad_key = "agent:main:zulip:stream:11:topic 6/17:u@example.com"
+        sessions_file = tmp_path / "sessions.json"
+        sessions_file.write_text(json.dumps({
+            bad_key: {
+                "session_key": bad_key, "session_id": "../escape",
+                "created_at": "2026-01-01T00:00:00", "updated_at": "2026-01-01T00:00:00",
+            },
+        }))
+
+        config = GatewayConfig()
+        store = SessionStore(sessions_dir=tmp_path, config=config)
+        store._ensure_loaded()
+
+        # session_id is path-unsafe → cannot be safely re-keyed → skipped entirely.
+        assert not any(e.session_id == "../escape" for e in store._entries.values())
