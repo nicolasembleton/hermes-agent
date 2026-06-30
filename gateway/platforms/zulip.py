@@ -193,6 +193,37 @@ def _build_zform_widget_content(heading: str, choices: List[Dict[str, Any]]) -> 
     )
 
 
+def _format_approval_zform_heading(command: str, description: str = "") -> str:
+    """Build a zform heading that states what the user is approving.
+
+    Zulip clients foreground the zform widget over the message body (same
+    pattern as the trivia-quiz bot, which puts the question in ``heading``).
+    A generic heading like "Command approval required" leaves users staring at
+    approve/deny buttons with no idea which command is blocked.
+    """
+    cmd = (command or "").strip()
+    if not cmd:
+        return "Command approval required"
+
+    max_heading = 120
+
+    if cmd.startswith("execute_code"):
+        inner = [ln.strip() for ln in cmd.splitlines()[1:-1] if ln.strip()]
+        preview = inner[0] if inner else ""
+        prefix = "Approve execute_code: "
+        budget = max_heading - len(prefix)
+        if budget > 1 and len(preview) > budget:
+            preview = preview[: budget - 1] + "…"
+        return f"{prefix}{preview}" if preview else "Approve execute_code script"
+
+    preview = cmd.splitlines()[0].strip() if "\n" in cmd else cmd
+    prefix = "Approve: "
+    budget = max_heading - len(prefix)
+    if budget > 1 and len(preview) > budget:
+        preview = preview[: budget - 1] + "…"
+    return f"{prefix}{preview}"
+
+
 def _build_stream_chat_id(stream_id: int, topic: str) -> str:
     """Encode a stream message's origin as a stable chat ID.
 
@@ -987,10 +1018,11 @@ class ZulipAdapter(BasePlatformAdapter):
             {"short_name": "Always", "long_name": "Approve this pattern permanently", "reply": "/approve always"},
             {"short_name": "Deny", "long_name": "Deny and cancel the command", "reply": "/deny"},
         ]
+        heading = _format_approval_zform_heading(command, description)
         return await self._send_zform_choices(
             chat_id=chat_id,
             content=body,
-            heading="Command approval required",
+            heading=heading,
             choices=choices,
             metadata=metadata,
         )

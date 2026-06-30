@@ -4591,8 +4591,32 @@ class TestZulipZformPrompts:
         widget = json.loads(request["widget_content"])
         replies = [choice["reply"] for choice in widget["extra_data"]["choices"]]
         assert replies == ["/approve", "/approve session", "/approve always", "/deny"]
-        assert widget["extra_data"]["heading"] == "Command approval required"
+        assert widget["extra_data"]["heading"] == "Approve: rm -rf /tmp/example"
         assert "rm -rf /tmp/example" in request["content"]
+
+    @pytest.mark.asyncio
+    async def test_send_exec_approval_heading_summarizes_execute_code(self):
+        """Zform heading must state the blocked script, not a generic label."""
+        code = (
+            "execute_code <<'PY'\n"
+            "from ddgs import DDGS\n"
+            "with DDGS() as ddgs:\n"
+            "    print('hi')\n"
+            "PY"
+        )
+        result = await self.adapter.send_exec_approval(
+            chat_id="42:ops",
+            command=code,
+            session_key="zulip:42:ops:alice@example.com",
+            description="execute_code script execution",
+        )
+
+        assert result.success is True
+        widget = json.loads(
+            self.adapter._client.send_message.call_args[0][0]["widget_content"]
+        )
+        assert widget["extra_data"]["heading"] == "Approve execute_code: from ddgs import DDGS"
+        assert "from ddgs import DDGS" in self.adapter._client.send_message.call_args[0][0]["content"]
 
     @pytest.mark.asyncio
     async def test_send_exec_approval_keeps_long_prompt_with_widget(self):
