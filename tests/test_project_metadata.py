@@ -71,7 +71,7 @@ def test_lazy_installable_extras_excluded_from_all():
         "edge-tts", "tts-premium",
         "voice",  # faster-whisper / sounddevice / numpy
         "modal", "daytona",
-        "messaging", "slack", "matrix", "dingtalk", "feishu",
+        "messaging", "slack", "zulip", "matrix", "dingtalk", "feishu",
         "honcho", "hindsight",
         "supermemory", "mem0",
         "mistral",  # mistralai — Voxtral STT/TTS, lazy-installed (stt.mistral / tts.mistral)
@@ -220,6 +220,14 @@ def test_feishu_extra_includes_qrcode_for_qr_login():
 
     feishu_extra = optional_dependencies["feishu"]
     assert any(dep.startswith("qrcode") for dep in feishu_extra)
+
+
+def test_zulip_extra_matches_lazy_install_pin():
+    from tools.lazy_deps import LAZY_DEPS
+
+    optional_dependencies = _load_optional_dependencies()
+
+    assert optional_dependencies["zulip"] == list(LAZY_DEPS["platform.zulip"])
 
 
 def test_nemo_relay_extra_uses_official_0_3_distribution():
