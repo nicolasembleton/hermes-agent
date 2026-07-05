@@ -630,11 +630,16 @@ def _execute_job_now(job: Dict[str, Any]) -> Dict[str, Any]:
         # also clears the fire claim) and returns True iff it processed the job.
         processed = run_one_job(job)
         refreshed = get_job(job_id) or {}
-        ok = refreshed.get("last_status") == "ok"
+        if refreshed:
+            ok = refreshed.get("last_status") == "ok"
+            error = refreshed.get("last_error")
+        else:
+            ok = bool(job.get("_execution_success"))
+            error = job.get("_execution_error")
         return {
             "claimed": True,
             "success": bool(processed and ok),
-            "error": refreshed.get("last_error"),
+            "error": error,
         }
 
     except Exception as e:

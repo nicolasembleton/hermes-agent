@@ -3244,6 +3244,12 @@ def run_one_job(job: dict, *, adapters=None, loop=None, verbose: bool = False) -
             success = False
             error = "Agent completed but produced empty response (model error, timeout, or misconfiguration)"
 
+        # mark_job_run() removes finite one-shot jobs immediately after their
+        # repeat limit is reached. Preserve the run result in memory so manual
+        # callers can report the actual outcome after removal.
+        job["_execution_success"] = bool(success)
+        job["_execution_error"] = error
+
         mark_job_run(job["id"], success, error, delivery_error=delivery_error)
         return True
 

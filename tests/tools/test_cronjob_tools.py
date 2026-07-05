@@ -298,6 +298,35 @@ class TestUnifiedCronjobTool:
         assert resumed["success"] is True
         assert resumed["job"]["state"] == "scheduled"
 
+    def test_run_no_agent_one_shot_reports_success_after_job_removal(self):
+        from hermes_constants import get_hermes_home
+
+        scripts_dir = get_hermes_home() / "scripts"
+        scripts_dir.mkdir(parents=True, exist_ok=True)
+        (scripts_dir / "manual-smoke.sh").write_text(
+            "#!/usr/bin/env bash\nprintf 'manual smoke\\n'\n",
+            encoding="utf-8",
+        )
+
+        created = json.loads(
+            cronjob(
+                action="create",
+                schedule="every 1h",
+                name="manual smoke",
+                repeat=1,
+                deliver="local",
+                script="manual-smoke.sh",
+                no_agent=True,
+            )
+        )
+
+        result = json.loads(cronjob(action="run", job_id=created["job_id"]))
+
+        assert result["success"] is True
+        assert result["job"]["executed"] is True
+        assert result["job"]["execution_success"] is True
+        assert json.loads(cronjob(action="list"))["count"] == 0
+
     def test_update_schedule_recomputes_display(self):
         created = json.loads(cronjob(action="create", prompt="Check", schedule="every 1h"))
         job_id = created["job_id"]

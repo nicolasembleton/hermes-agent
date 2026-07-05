@@ -527,6 +527,12 @@ def _parse_target_ref(platform_name: str, target_ref: str):
         topic = target_ref.strip()
         if topic:
             return topic, None, True
+    if platform_name == "zulip":
+        target = target_ref.strip()
+        if target.startswith("dm:") and len(target) > 3:
+            return target, None, True
+        if ":" in target:
+            return target, None, True
     if platform_name == "email":
         match = _EMAIL_TARGET_RE.fullmatch(target_ref)
         if match:

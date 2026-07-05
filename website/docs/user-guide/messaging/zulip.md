@@ -259,71 +259,9 @@ ZULIP_HOME_TOPIC=notifications
 
 `ZULIP_HOME_CHANNEL` takes precedence when both forms are set.
 
-## Known Core Follow-Ups
-
-The Zulip adapter is intentionally shipped through the plugin path, so this PR
-does not change core target parsing or cron bookkeeping. Two generic Hermes
-edges are worth tracking separately:
-
-- `hermes send --to zulip "message"` works when `ZULIP_HOME_CHANNEL` is set.
-  `hermes send --to "zulip:5:Sauve Cloud Status" "message"` currently goes
-  through the shared channel-name resolver before the Zulip adapter sees it.
-  A core follow-up can teach `send_message_tool` that Zulip `stream:topic` and
-  `dm:...` strings are explicit adapter-native targets.
-- `hermes cron run` for a finite `--repeat 1` smoke job can report failure
-  after the job removes itself, even when the script ran and delivery succeeded.
-  The saved output and gateway logs are authoritative for that edge case. Use
-  `--repeat 2` during manual smoke testing if you need the job to remain visible
-  after the first run.
-
-Candidate patch for the first follow-up:
-
-```diff
-diff --git a/tools/send_message_tool.py b/tools/send_message_tool.py
-@@
-     if platform_name == "ntfy":
-         topic = target_ref.strip()
-         if topic:
-             return topic, None, True
-+    if platform_name == "zulip":
-+        target = target_ref.strip()
-+        if target.startswith("dm:") and len(target) > 3:
-+            return target, None, True
-+        if ":" in target:
-+            return target, None, True
-     if platform_name == "email":
-```
-
-Candidate shape for the second follow-up:
-
-```diff
-diff --git a/cron/scheduler.py b/cron/scheduler.py
-@@
-         if success and not final_response.strip():
-             success = False
-             error = "Agent completed but produced empty response (model error, timeout, or misconfiguration)"
-+
-+        # mark_job_run() removes finite one-shot jobs immediately after their
-+        # repeat limit is reached. Preserve the run result in memory so
-+        # manual callers can report the actual outcome after removal.
-+        job["_execution_success"] = bool(success)
-+        job["_execution_error"] = error
-
-         mark_job_run(job["id"], success, error, delivery_error=delivery_error)
-diff --git a/tools/cronjob_tools.py b/tools/cronjob_tools.py
-@@
-         processed = run_one_job(job)
-         refreshed = get_job(job_id) or {}
--        ok = refreshed.get("last_status") == "ok"
-+        ok = refreshed.get("last_status") == "ok" if refreshed else bool(job.get("_execution_success"))
-+        error = refreshed.get("last_error") if refreshed else job.get("_execution_error")
-         return {
-             "claimed": True,
-             "success": bool(processed and ok),
--            "error": refreshed.get("last_error"),
-+            "error": error,
-         }
-```
+`hermes send --to zulip "message"` uses the configured home channel. You can
+also address Zulip explicitly with `hermes send --to "zulip:stream:topic" ...`
+or `hermes send --to "zulip:dm:user@example.com" ...`.
 
 ## Missed-Message Catch-Up
 
